@@ -9,6 +9,7 @@ import scipy.stats as sps
 import matplotlib.pyplot as plt
 import numpy as np
 import time
+import pandas as pd
 
 import concurrent.futures
 
@@ -24,6 +25,9 @@ tag = "asympt"
 Nsamples = 0
 
 # Ditch the simulations and just compute asymptotic results
+# This is very fast! Only have to fit nuisance parameters under
+# the observed data. Could even save those and do them only once
+# ever, but meh.
 asymptotic_only = True
 
 do_MC = True
@@ -32,6 +36,17 @@ if asymptotic_only:
 
 # Skip to mu_monster
 skip_to_mu_mon = False
+
+# Dictionary of results
+results = {}
+
+# Actually, the GOF best should work a bit differently. Currently we
+# simulate under the background-only hypothesis, which is fine for
+# testing the goodness of fit of the data to the background-only
+# hypothesis, but we also want to test the goodness-of-fit of e.g.
+# a GAMBIT best fit point. For that, we need to simulate under
+# some best-fit signal hypothesis.
+
 
 # Merge all experiments into one giant experiment
 # Will have problems with parameter name collisions. Can avoid them
@@ -163,7 +178,7 @@ def makeplot(ax, tobin, theoryf, log=True, label="", c='r', obs=None, pval=None,
 
 def fit_general_model(e,samples):
    print("Fitting experiment {0}".format(e.name))
-
+ 
    # Collect data about experiment and how to fit it 
    model = e.general_model
 
@@ -254,21 +269,22 @@ def fit_mu_model(e,samples,s):
 
    return LLR, LLR_obs, pval
 
-# Simulate data
+# Simulate data and prepare results dictionaries
 all_samples = []
 for e in experiments:
    if do_MC:
       all_samples += [e.general_model.simulate(Nsamples,1,e.null_parameters)]
    else:
       all_samples += [[]]
-
+   results[e.name] = {}
+ 
 if not skip_to_mu_mon:
    # Main loop for fitting experiments 
    LLR_monster = 0
    LLR_obs_monster = 0
    for j,(e,samples) in enumerate(zip(experiments,all_samples)):
       # Do fit!
-      LLR, LLR_obs, pval, e.DOF = fit_general_model(e,samples)
+      LLR, LLR_obs, pval, DOF = fit_general_model(e,samples)
        
       # Save LLR for combining (only works if experiments have no common parameters)
       if LLR is not None:
@@ -280,7 +296,7 @@ if not skip_to_mu_mon:
       # Plot! 
       fig= plt.figure(figsize=(6,4))
       ax = fig.add_subplot(111)
-      makeplot(ax, LLR, lambda q: sps.chi2.pdf(q, e.DOF), log=True, 
+      makeplot(ax, LLR, lambda q: sps.chi2.pdf(q, DOF), log=True, 
               label='free s', c='g', obs=LLR_obs, pval=pval, title=e.name)
       ax.legend(loc=1, frameon=False, framealpha=0,prop={'size':10})
       fig.savefig('auto_experiment_{0}_{1}.png'.format(e.name,tag))
@@ -295,8 +311,16 @@ if not skip_to_mu_mon:
               label='mu', c='b', obs=mu_LLR_obs, pval=mu_pval, title=e.name)
       ax.legend(loc=1, frameon=False, framealpha=0,prop={'size':10})
       fig.savefig('auto_experiment_mu_{0}_{1}.png'.format(e.name,tag))
-   
-   
+  
+      # Store results
+      results[e.name]["LLR_gof_b"]   = LLR_obs
+      results[e.name]["LLR_mu_b"]    = mu_LLR_obs
+      results[e.name]["pval_gof_b"]  = pval
+      results[e.name]["signif. gof_b"]  = -sps.norm.ppf(pval) #/2.) I prefer two-tailed but Andrew says 1-tailed is the convention...
+      results[e.name]["pval_mu_b"]   = mu_pval
+      results[e.name]["signif. mu_b"]  = -sps.norm.ppf(mu_pval)
+      results[e.name]["DOF"]         = DOF 
+
    # Plot monster LLR distribution
    fig= plt.figure(figsize=(6,4))
    ax = fig.add_subplot(111)
@@ -325,4 +349,24 @@ makeplot(ax, mu_LLR, lambda q: sps.chi2.pdf(q, 1), log=True,
         label='mu', c='b', obs=mu_LLR_obs, pval=mu_pval, title="Monster")
 ax.legend(loc=1, frameon=False, framealpha=0,prop={'size':10})
 fig.savefig('auto_experiment_mu_monster_{0}.png'.format(tag))
+
+# Store results for Monster
+results["Combined"] = {}
+results["Combined"]["LLR_gof_b"]   = LLR_obs_monster
+results["Combined"]["LLR_mu_b"]    = mu_LLR_obs
+results["Combined"]["pval_gof_b"]  = monster_pval
+results["Combined"]["pval_mu_b"]   = mu_pval
+results["Combined"]["signif. gof_b"] = -sps.norm.ppf(monster_pval)
+results["Combined"]["signif. mu_b"]  = -sps.norm.ppf(mu_pval)
+results["Combined"]["DOF"]         = monster_DOF 
+
+# Ok let's produce some nice tables of results. Maybe even
+# some cool bar graphs showing the "pull" of each experiment
+
+# Convert results to Pandas dataframe
+r = pd.DataFrame.from_dict(results,orient='index')
+order = ['DOF','LLR_gof_b','pval_gof_b','signif. gof_b',
+               'LLR_mu_b', 'pval_mu_b', 'signif. mu_b']
+exp_order = [e.name for e in experiments] + ['Combined']
+print(r[order].reindex(exp_order))
 
