@@ -29,13 +29,13 @@ joint = jtd.JointModel([sps.norm,sps.norm])
 
 # Create the "observed" data
 # Need extra axes for matching shape of many simulated datasets
-observed_data = np.array([7,8])[np.newaxis,np.newaxis,:]
+observed_data = np.array([6.5,7.5])[np.newaxis,np.newaxis,:]
 
 # "Background" predictions
 b = [5,6]
 
 # s_MLE is not required, just useful for testing
-s_MLE = [2,2]
+s_MLE = [1.5,1.5]
 
 # Create parameter mappings
 # Proxy for 'signal strength' parameter added

@@ -20,15 +20,18 @@ experiment_definitions = ["test","CMS_13TeV_2OSLEP_36invfb"]
 experiments = [importlib.import_module("experiments.{0}".format(lib)) 
                  for lib in experiment_definitions]
 
-tag = "asympt"
-#Nsamples = int(float(tag))
-Nsamples = 0
+tag = "1e3"
+Nsamples = int(float(tag))
+#Nsamples = 0
 
 # Ditch the simulations and just compute asymptotic results
 # This is very fast! Only have to fit nuisance parameters under
 # the observed data. Could even save those and do them only once
 # ever, but meh.
-asymptotic_only = True
+if Nsamples == 0:
+   asymptotic_only = True
+else:
+   asymptotic_only = False
 
 do_MC = True
 if asymptotic_only:
@@ -129,7 +132,7 @@ class MonsterExperiment:
         return self.create_jointmodel(jointmodels) 
 
     def get_seeds(self,samples):
-        datalist = c.split_data(self,samples,self.experiment_dims)
+        datalist = c.split_data(samples,self.experiment_dims)
         print("samples.shape:",samples.shape)
         print("datalist.shapes:",[d.shape for d in datalist])
         seeds = {}
@@ -137,7 +140,7 @@ class MonsterExperiment:
             seeds.update(seedf(data))
 
     def get_seeds_null(self,samples):
-        datalist = c.split_data(self,samples,self.experiment_dims)
+        datalist = c.split_data(samples,self.experiment_dims)
         seeds = {}
         for data, seedf in zip(datalist,self.get_seed_null_fs):
             seeds.update(seedf(data))
@@ -149,7 +152,7 @@ m = MonsterExperiment(experiments)
 def makeplot(ax, tobin, theoryf, log=True, label="", c='r', obs=None, pval=None,
              title=None):
     ran = (0,25)
-    yran = (1e-3,0.5)
+    yran = (1e-4,0.5)
     if tobin is not None:
        n, bins = np.histogram(tobin, bins=50, normed=True, range=ran)
        print("Histogram y range:", np.min(n[n!=0]),np.max(n))
@@ -202,6 +205,9 @@ def fit_general_model(e,samples):
 
       # Likelihood ratio test statistics
       LLR = -2*(Lmax0 - Lmax)
+
+      # Correct (hopefully) small numerical errors
+      LLR[LLR<0] = 0
    else:
       LLR = None
 
@@ -213,11 +219,20 @@ def fit_general_model(e,samples):
    Lmax_obs, pmax_obs = model.find_MLE_parallel(gen_opt, odata, 
                  method='minuit', Nprocesses=1, seeds=e.get_seeds_null(odata))
  
-   # Asymptotic p-values
+   # Asymptotic p-value
    LLR_obs = -2 * (Lmax0_obs[0] - Lmax_obs[0])
-   pval = 1 - sps.chi2.cdf(LLR_obs, e.DOF) 
+   apval = 1 - sps.chi2.cdf(LLR_obs, e.DOF) 
 
-   return LLR, LLR_obs, pval, e.DOF
+   # Empirical p-value
+   a = np.argsort(LLR)
+   print("LLR:",LLR[a])
+   print("Lmax0:",Lmax0[a])
+   print("Lmax :",Lmax[a])
+   if LLR is not None:
+      epval = c.e_pval(LLR,LLR_obs)
+   else:
+      epval = None
+   return LLR, LLR_obs, apval, epval, e.DOF
 
 def fit_mu_model(e,samples,s):
    """Simulate the 'mu' hypothesis test
@@ -252,6 +267,9 @@ def fit_mu_model(e,samples,s):
   
       # Likelihood ratio test statistics
       LLR = -2*(Lmax0 - Lmax)
+
+      # Correct (hopefully) small numerical errors
+      LLR[LLR<0] = 0
    else:
       LLR = None
 
@@ -267,13 +285,18 @@ def fit_mu_model(e,samples,s):
    LLR_obs = -2 * (Lmax0_obs[0] - Lmax_obs[0])
    pval = 1 - sps.chi2.cdf(LLR_obs, 1) # Only one unprofiled parameter, mu. 
 
-   return LLR, LLR_obs, pval
+   if LLR is not None:
+      # Empirical p-value
+      epval = c.e_pval(LLR,LLR_obs)
+   else:
+      epval = None
+   return LLR, LLR_obs, pval, epval
 
 # Simulate data and prepare results dictionaries
 all_samples = []
 for e in experiments:
    if do_MC:
-      all_samples += [e.general_model.simulate(Nsamples,1,e.null_parameters)]
+      all_samples += [e.general_model.simulate(Nsamples,e.null_parameters)]
    else:
       all_samples += [[]]
    results[e.name] = {}
@@ -284,7 +307,7 @@ if not skip_to_mu_mon:
    LLR_obs_monster = 0
    for j,(e,samples) in enumerate(zip(experiments,all_samples)):
       # Do fit!
-      LLR, LLR_obs, pval, DOF = fit_general_model(e,samples)
+      LLR, LLR_obs, pval, epval, DOF = fit_general_model(e,samples)
        
       # Save LLR for combining (only works if experiments have no common parameters)
       if LLR is not None:
@@ -302,7 +325,7 @@ if not skip_to_mu_mon:
       fig.savefig('auto_experiment_{0}_{1}.png'.format(e.name,tag))
    
       # Fit mu model
-      mu_LLR, mu_LLR_obs, mu_pval = fit_mu_model(e,samples,e.s_MLE)
+      mu_LLR, mu_LLR_obs, mu_pval, mu_epval = fit_mu_model(e,samples,e.s_MLE)
    
       # Plot! 
       fig= plt.figure(figsize=(6,4))
@@ -313,19 +336,28 @@ if not skip_to_mu_mon:
       fig.savefig('auto_experiment_mu_{0}_{1}.png'.format(e.name,tag))
   
       # Store results
-      results[e.name]["LLR_gof_b"]   = LLR_obs
-      results[e.name]["LLR_mu_b"]    = mu_LLR_obs
-      results[e.name]["pval_gof_b"]  = pval
-      results[e.name]["signif. gof_b"]  = -sps.norm.ppf(pval) #/2.) I prefer two-tailed but Andrew says 1-tailed is the convention...
-      results[e.name]["pval_mu_b"]   = mu_pval
-      results[e.name]["signif. mu_b"]  = -sps.norm.ppf(mu_pval)
-      results[e.name]["DOF"]         = DOF 
+      results[e.name]["LLR_gof_b"]      = LLR_obs
+      results[e.name]["LLR_mu_b"]       = mu_LLR_obs
+      results[e.name]["apval_gof_b"]    = pval
+      results[e.name]["asignif. gof_b"] = -sps.norm.ppf(pval) #/2.) I prefer two-tailed but Andrew says 1-tailed is the convention...
+      results[e.name]["apval_mu_b"]     = mu_pval
+      results[e.name]["asignif. mu_b"]  = -sps.norm.ppf(mu_pval)
+      results[e.name]["DOF"]            = DOF 
+      if LLR is not None:
+         results[e.name]["epval_gof_b"]    = epval
+         results[e.name]["esignif. gof_b"] = -sps.norm.ppf(epval) #/2.) I prefer two-tailed but Andrew says 1-tailed is the convention...
+         results[e.name]["epval_mu_b"]     = mu_epval
+         results[e.name]["esignif. mu_b"]  = -sps.norm.ppf(mu_epval)
 
+   a = np.argsort(LLR)
+   print("LLR_monster:",LLR_monster[a])
+ 
    # Plot monster LLR distribution
    fig= plt.figure(figsize=(6,4))
    ax = fig.add_subplot(111)
    monster_DOF = np.sum([e.DOF for e in experiments])
-   monster_pval = 1 - sps.chi2.cdf(LLR_obs_monster, monster_DOF) 
+   monster_pval = 1 - sps.chi2.cdf(LLR_obs_monster, monster_DOF)
+   monster_epval = c.e_pval(LLR_monster,LLR_obs_monster) if do_MC else None
    makeplot(ax, LLR_monster, lambda q: sps.chi2.pdf(q, monster_DOF), 
             log=True, label='free s', c='g',
             obs=LLR_obs_monster, pval=monster_pval, title="Monster")
@@ -340,7 +372,7 @@ else:
    monster_samples = None
 
 slist = [e.s_MLE for e in experiments]
-mu_LLR, mu_LLR_obs, mu_pval = fit_mu_model(m,monster_samples,slist)
+mu_LLR, mu_LLR_obs, mu_pval, mu_epval = fit_mu_model(m,monster_samples,slist)
 
 # Plot! 
 fig= plt.figure(figsize=(6,4))
@@ -354,19 +386,33 @@ fig.savefig('auto_experiment_mu_monster_{0}.png'.format(tag))
 results["Combined"] = {}
 results["Combined"]["LLR_gof_b"]   = LLR_obs_monster
 results["Combined"]["LLR_mu_b"]    = mu_LLR_obs
-results["Combined"]["pval_gof_b"]  = monster_pval
-results["Combined"]["pval_mu_b"]   = mu_pval
-results["Combined"]["signif. gof_b"] = -sps.norm.ppf(monster_pval)
-results["Combined"]["signif. mu_b"]  = -sps.norm.ppf(mu_pval)
+results["Combined"]["apval_gof_b"]  = monster_pval
+results["Combined"]["apval_mu_b"]   = mu_pval
+results["Combined"]["asignif. gof_b"] = -sps.norm.ppf(monster_pval)
+results["Combined"]["asignif. mu_b"]  = -sps.norm.ppf(mu_pval)
 results["Combined"]["DOF"]         = monster_DOF 
+if do_MC:
+   results["Combined"]["epval_gof_b"]  = monster_epval
+   results["Combined"]["epval_mu_b"]   = mu_epval
+   results["Combined"]["esignif. gof_b"] = -sps.norm.ppf(monster_epval)
+   results["Combined"]["esignif. mu_b"]  = -sps.norm.ppf(mu_epval)
 
 # Ok let's produce some nice tables of results. Maybe even
 # some cool bar graphs showing the "pull" of each experiment
 
 # Convert results to Pandas dataframe
-r = pd.DataFrame.from_dict(results,orient='index')
-order = ['DOF','LLR_gof_b','pval_gof_b','signif. gof_b',
-               'LLR_mu_b', 'pval_mu_b', 'signif. mu_b']
+r = pd.DataFrame.from_dict(results)
+order = ['DOF',
+          'LLR_gof_b',
+          'apval_gof_b']
+if do_MC: order += ['epval_gof_b']
+order += ['asignif. gof_b']
+if do_MC: order += ['esignif. gof_b']
+order += ['LLR_mu_b', 
+           'apval_mu_b'] 
+if do_MC: order += ['epval_mu_b']
+order += ['asignif. mu_b']
+if do_MC: order += ['esignif. mu_b']
 exp_order = [e.name for e in experiments] + ['Combined']
-print(r[order].reindex(exp_order))
+print(r[exp_order].reindex(order))
 
