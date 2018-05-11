@@ -46,15 +46,6 @@ s_MLE = np.array(CMS_o) - np.array(CMS_b)
 
 N_regions = len(CMS_o)
 
-poisson_part = [sps.poisson for i in range(N_regions)]
-correlations = [(sps.multivariate_normal,7)]
-
-# Let's also create a version which ignores the correlations
-# This will be much faster to fit, and should still resemble
-# the right answer, so can be a helpful cross-check.
-# Just take the diagonal of the multivariate normal.
-no_correlations = [sps.norm for i in range(N_regions)]
-
 # The parameter mapping functions are all almost identical
 # so we can create them with a generator function
 # As a subtlety, we need to add the generated functions to
@@ -87,8 +78,8 @@ poisson_fs   = [make_poisson_func(i) for i in range(N_regions)]
 poisson_args = [poisson_arg_names(i) for i in range(N_regions)]
 
 # Parameter mapping function for nuisance parameter constraints
-def func_nuis(*thetas):
-    means = np.array(thetas)
+def func_nuis(**thetas):
+    means = np.array([thetas['theta_{0}'.format(i)] for i in range(N_regions)])
     return {'mean': means.flatten(),
              'cov': CMS_cov}
 
@@ -109,6 +100,21 @@ nuis_fs_noc = [make_nuis_func(i) for i in range(N_regions)]
 # Also note the comma to force it to be a tuple
 nuis_args_noc = [("theta_{0}".format(i),) for i in range(N_regions)]
 
+# Create the transformed pdf functions
+# Also requires some parameter renaming since we use the
+# same underlying function repeatedly
+poisson_part = [jtd.TransDist(sps.poisson,make_poisson_func(i),
+                       ['s_{0} -> s'.format(i), 
+                        'theta_{0} -> theta'.format(i)])
+                 for i in range(N_regions)]
+corr_dist = jtd.TransDist(sps.multivariate_normal,func_nuis)
+correlations = [(corr_dist,7)]
+
+# Let's also create a version which ignores the correlations
+# This will be much faster to fit, and should still resemble
+# the right answer, so can be a helpful cross-check.
+# Just take the diagonal of the multivariate normal.
+no_correlations = [jtd.TransDist(sps.norm,make_nuis_func(i)) for i in range(N_regions)]
 
 # Create the joint PDF objects
 joint     = jtd.JointModel(poisson_part + correlations)
@@ -118,13 +124,11 @@ joint_noc = jtd.JointModel(poisson_part + no_correlations)
 # Set 'mu' parameter to be considered as fixed, since we
 # don't plan to use it in these models.
 general_model = jtm.ParameterModel(joint, 
-                               poisson_fs + nuis_fs, 
                                poisson_args + nuis_args,
                                fix={'mu':1})
 
 # Not using this atm.
 model_noc = jtm.ParameterModel(joint_noc, 
-                               poisson_fs + nuis_fs_noc, 
                                poisson_args + nuis_args_noc,
                                fix={'mu':1})
 
@@ -176,14 +180,17 @@ def make_mu_func(i,s):
 def make_mu_model(s):
     mu_funcs = []
     mu_args = []
+    mu_argmap = []
     for i in range(N_regions):
         # mu and theta will still have to be profiled out
         mu_funcs += [make_mu_func(i,s[i])]
-        mu_args  += [('mu','theta_{0}'.format(i))]        
-    model = jtm.ParameterModel(joint, 
-                               mu_funcs + nuis_fs, 
-                               mu_args + nuis_args,
-                               )
+        mu_args  += [('mu','theta_{0}'.format(i))]       
+        mu_argmap+= [['theta_{0} -> theta'.format(i)]]
+
+    poisson_mu_part = [jtd.TransDist(sps.poisson,mu_funcs[i],mu_argmap[i]) for i in range(N_regions)]
+    joint = jtd.JointModel(poisson_mu_part + correlations)
+    model = jtm.ParameterModel(joint, mu_args + nuis_args)
+
     # Will need to set options for 'mu' and 'error_mu'
     # externally. This will depend on the test statistic.
     # Nuisance parameter options in 'nuisance_options' can be used.

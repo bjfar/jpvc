@@ -24,13 +24,6 @@ from functools import partial
 
 name = "test"
 
-# Create the joint PDF object
-joint = jtd.JointModel([sps.norm,sps.norm])
-
-# Create the "observed" data
-# Need extra axes for matching shape of many simulated datasets
-observed_data = np.array([6.5,7.5])[np.newaxis,np.newaxis,:]
-
 # "Background" predictions
 b = [5,6]
 
@@ -45,7 +38,14 @@ def pars1(mu,mu1):
 def pars2(mu,mu2):
     return {"loc": b[1] + mu*mu2, "scale":1}
 
-general_model = jtm.ParameterModel(joint,[pars1,pars2])
+# Create the joint PDF object
+general_model = jtm.ParameterModel([jtd.TransDist(sps.norm,pars1),
+                                    jtd.TransDist(sps.norm,pars2)]
+                                   ,[['mu','mu1'],['mu','mu2']])
+
+# Create the "observed" data
+# Need extra axes for matching shape of many simulated datasets
+observed_data = np.array([6.5,7.5])[np.newaxis,np.newaxis,:]
 
 # Define the null hypothesis
 null_parameters = {'mu':0, 'mu1':0, 'mu2':0}
@@ -76,10 +76,8 @@ DOF = 2
 def make_mu_model(s):
     # Create new parameter mapping functions with 'mu1' and 'mu2' parameters fixed.
     # The 'partial' tool from functools is super useful for this.
-    funcs = [partial(pars1, mu1=s[0]),
-             partial(pars2, mu2=s[1])]
-    # However, we then need to explicitly tell the ParameterModel what the function
-    # arguments are
-    fargs = [['mu'],['mu']]
-    return jtm.ParameterModel(joint,funcs,fargs) 
+    s_model = jtm.ParameterModel([jtd.TransDist(sps.norm, partial(pars1, mu1=s[0])),
+                                  jtd.TransDist(sps.norm, partial(pars2, mu2=s[1]))]
+                                 ,[['mu'],['mu']])
+    return s_model 
 

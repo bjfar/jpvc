@@ -20,7 +20,7 @@ experiment_definitions = ["test","CMS_13TeV_2OSLEP_36invfb"]
 experiments = [importlib.import_module("experiments.{0}".format(lib)) 
                  for lib in experiment_definitions]
 
-tag = "1e3"
+tag = "1e2"
 Nsamples = int(float(tag))
 #Nsamples = 0
 
@@ -110,16 +110,14 @@ class MonsterExperiment:
         """Create a single giant ParameterModel out of a list of
         ParameterModels"""
         all_submodels = []
-        all_parfs = []
         all_fargs = []
         all_dims = []
         for m in parmodels:
             all_submodels += m.model.submodels
             all_dims += m.model.dims
-            all_parfs += m.parfs
             all_fargs += m.submodel_deps
         new_joint = jtd.JointModel(list(zip(all_submodels,all_dims)))
-        return jtm.ParameterModel(new_joint,all_parfs,all_fargs)
+        return jtm.ParameterModel(new_joint,all_fargs)
 
     def make_mu_model(self,slist): 
         """Create giant ParameterModel for a signal hypothesis 's'
