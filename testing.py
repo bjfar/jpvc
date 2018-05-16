@@ -1,4 +1,42 @@
-"""Some beginning testing stuff"""
+"""Some beginning testing stuff
+
+We do the following two sorts of statistical tests
+'gof' - Goodness of fit. Each experiment characterises itself in terms of a
+        number of free parameters, which are fit independently. A single
+        'null hypothesis' set of parameters is supplied for testing (e.g.
+        the predictions of the best fit point of some scan).
+        We simulate under this null hypothesis, and fit the free experimental
+        parameters. We then test with L(null)/L(BF_free).
+
+'mu'  - Signal strength test. Predictions of e.g. best fit point are scaled
+        universally for all experiments with a signal strength parameter.
+        Note that these must be framed as an *extra* contribution to some
+        null prediction, e.g. Standard Model. We simulate under the 
+        Standard Model null hypothesis that mu=0, and test L(mu=0)/LR(BF_mu).
+
+        NOTE! The null hypothesis is very different in each of these tests!
+        So the simulated data is also completely different.
+        In the 'gof' test we are trying to exclude e.g. the best fit point
+        of a scan.
+        In the 'mu' test we are trying to exclude the mu=0 hypothesis, which
+        is certainly NOT the best fit point in a scan. However, we do use
+        the scan best fit point as input; this provides the *alternate* 
+        signal hypothesis which is scaled by 'mu'. So in a sense we are
+        testing if mu=0 can be excluded in favour of our scan best fit,
+        though it is not quite that simple since we essentially 'cherry-pick'
+        this signal hypothesis post-fit, so a certain look-elsewhere effect
+        is neglected.
+
+        Note also that the 'mu' test doesn't actually make sense for certain
+        observables that constrain the SM and the 'new physics' model in
+        essentially the same way. For example take alpha_s; this is a nuisance
+        parameter in the fit, constrained to observation, but there is no
+        'signal' to be found here. So there is no 'SM' vs 'new_physics' sort
+        of test to do with it (because we just fit the SM to observation, it 
+        isn't predicted). So it can only contribute to the 'gof' test. It 
+        doesn't make sense for the 'mu' test. There is no separable 'new 
+        physics' contribution to alpha_s that we could scale with 'mu' here.
+"""
 
 import JMCtools as jt
 import JMCtools.models as jtm
@@ -16,11 +54,37 @@ import concurrent.futures
 # To import experiments it is nice to do it like this,
 # so that we can iterate over them
 import importlib
-experiment_definitions = ["test","CMS_13TeV_2OSLEP_36invfb"]
-experiments = [importlib.import_module("experiments.{0}".format(lib)) 
+experiment_definitions = ["CMS_13TeV_2OSLEP_36invfb"] #"gaussian"
+experiment_modules = [importlib.import_module("experiments.{0}".format(lib)) 
                  for lib in experiment_definitions]
 
-tag = "1e2"
+# Set the null hypothesis for 'gof' tests. This means fixing the non-nuisance
+# parameters in all of the experiments to something.
+# For testing I am just matching these exactly to observed data: in reality
+# they should come from some model of interested, e.g. a scan best-fit
+gof_null = {}
+gof_null["top_mass"] = {'loc': 173.34}
+gof_null["alpha_s"]  = {'loc': 0.1181}
+gof_null["Z_invisible_width"] = {'loc': 0.2}
+def CMS_13TeV_2OSLEP_36invfb_NULL():
+   null_s = {"s_{0}".format(i): 0 for i in range(7)} # Actually we'll leave this as zero signal for testing
+   null_theta = {"theta_{0}".format(i): 0 for i in range(7)}
+   null_parameters = {"mu": 0 , **null_s, **null_theta}
+   return null_parameters
+gof_null["CMS_13TeV_2OSLEP_36invfb"] = CMS_13TeV_2OSLEP_36invfb_NULL()
+
+# The 'mu' hypothesis null parameters should be defined internally by each experiment.
+
+# Extract all experiments from modules (some define more than one experiment)
+# Not all experiments are used in all tests, so we also divide them up as needed
+gof_experiments = []
+mu_experiments = [] 
+for em in experiment_modules:
+    for e in em.experiments:
+        if 'gof' in e.tests.keys(): gof_experiments += [e]
+        if 'mu'  in e.tests.keys(): mu_experiments  += [e]
+
+tag = "5e2"
 Nsamples = int(float(tag))
 #Nsamples = 0
 
@@ -37,8 +101,14 @@ do_MC = True
 if asymptotic_only:
     do_MC = False
 
+# Do single-parameter mu scaling fit?
+do_mu = True 
+
 # Skip to mu_monster
 skip_to_mu_mon = False
+
+# Analyse full combined model?
+do_monster = False
 
 # Dictionary of results
 results = {}
@@ -60,19 +130,19 @@ class MonsterExperiment:
       
        List of stuff that an experiment needs to define:
 
-         name
-         general_model
-         make_mu_model
-         null_parameters
-         get_seeds
-         get_seeds_null
-         null_options
-         general_options
-         observed_data
-         DOF
+        name
+        general_model
+        make_mu_model
+        null_parameters
+        get_seeds
+        get_seeds_null
+        null_options
+        general_options
+        observed_data
+        DOF
     """
 
-    def __init__(self,experiments,name="Monster"):
+    def __init__(self,experiments,name="Monster",common_pars=[]):
         self.name = name
         self.null_parameters = {}
         self.null_options = {}
@@ -86,38 +156,83 @@ class MonsterExperiment:
         self.get_seed_null_fs = []
         self.experiment_dims = []
         self.experiment_names = []
+        # Create new 'general' ParameterModel combining 
+        # all submodels of all experiments
         for e in experiments:
-            self.null_parameters.update(e.null_parameters)
-            self.null_options.update(e.null_options)
-            self.nuis_options.update(e.nuis_options)
-            self.general_options.update(e.general_options)
+            parmodels += [e.general_model]
+        self.general_model, renaming = self.create_jointmodel(parmodels,common_pars)
+        #print("renaming:",renaming)
+ 
+        # Collect the rest of the data about each experiment, and
+        # performing any parameter renaming that was needed to avoid
+        # name collisions in the new JointModel.
+        for e, rename in zip(experiments,renaming):
+            self.null_parameters.update(self.rename_options(e.null_parameters,rename))
+            self.null_options.update(self.rename_options(e.null_options,rename))
+            self.nuis_options.update(self.rename_options(e.nuis_options,rename))
+            self.general_options.update(self.rename_options(e.general_options,rename))
             self.DOF += e.DOF
             self.make_mu_model_fs += [e.make_mu_model]
             self.get_seed_fs      += [e.get_seeds]
             self.get_seed_null_fs += [e.get_seeds_null]
-            self.experiment_dims += [np.sum(e.general_model.model.dims)]
+            self.experiment_dims  += [np.sum(e.general_model.model.dims)]
             self.experiment_names += [e.name]
-            parmodels += [e.general_model]
             obs_data_list += [e.observed_data]
         # Join observed data along last axis
         self.observed_data = np.concatenate(
                  [o.reshape(1,1,-1) for o in obs_data_list],axis=-1) 
-        # Create new 'general' ParameterModel combining 
-        # all submodels of all experiments
-        self.general_model = self.create_jointmodel(parmodels)
 
-    def create_jointmodel(self,parmodels):
+    def rename_options(self,options,renaming):
+        # Work out renaming
+        rename_dict = {}
+        for instruction in renaming:
+            new,old = instruction.split(' -> ')
+            rename_dict[old] = new
+        # Collect and rename options/parameters
+        # This is tricky in general since options could have
+        # weird names depending on parameters. So for now this
+        # only works for the Minuit options.
+        # We replace 'par' in the following:
+        # 'par'
+        # 'error_par'
+        # 'fix_par'
+        new_opts = {}
+        for key,val in options.items():
+            newkey = key
+            words = key.split("_")
+            if len(words)==1:
+                if words[0] in rename_dict.keys():
+                    newkey = rename_dict[key]
+            if len(words)==2:
+                if words[0] == 'error' or words[0] == 'fix':
+                    par = '_'.join(words[1:])
+                    if par in rename_dict.keys():
+                        newkey = '{0}_{1}'.format(words[0],rename_dict[par])
+            new_opts[newkey] = val
+        return new_opts 
+
+    def create_jointmodel(self,parmodels,common_pars=[]):
         """Create a single giant ParameterModel out of a list of
         ParameterModels"""
         all_submodels = []
         all_fargs = []
         all_dims = []
-        for m in parmodels:
-            all_submodels += m.model.submodels
+        all_renaming = []
+        for i,m in enumerate(parmodels):
+            # Collect submodels and perform parameter renaming to avoid
+            # collisions, except where parameters are explicitly set
+            # as being common.
+            all_renaming += [[]]
+            for submodel in m.model.submodels:
+                temp = jtd.TransDist(submodel) # Need this to figure out parameter names
+                renaming = ['Exp{0}_{1} -> {1}'.format(i,par) for par in temp.args if par not in common_pars] 
+                #print(renaming, temp.args, common_pars)
+                all_renaming[i] += renaming  
+                all_submodels += [jtd.TransDist(submodel,renaming_map=renaming)]
             all_dims += m.model.dims
             all_fargs += m.submodel_deps
         new_joint = jtd.JointModel(list(zip(all_submodels,all_dims)))
-        return jtm.ParameterModel(new_joint,all_fargs)
+        return jtm.ParameterModel(new_joint,all_fargs), all_renaming
 
     def make_mu_model(self,slist): 
         """Create giant ParameterModel for a signal hypothesis 's'
@@ -127,7 +242,7 @@ class MonsterExperiment:
         jointmodels = []
         for s,f in zip(slist,self.make_mu_model_fs):
             jointmodels += [f(s)]
-        return self.create_jointmodel(jointmodels) 
+        return self.create_jointmodel(jointmodels,common_pars=['mu'])[0] 
 
     def get_seeds(self,samples):
         datalist = c.split_data(samples,self.experiment_dims)
@@ -144,7 +259,8 @@ class MonsterExperiment:
             seeds.update(seedf(data))
 
 # Create monster joint experiment
-m = MonsterExperiment(experiments)
+if do_monster:
+    m = MonsterExperiment(experiments)
 
 # Helper plotting function
 def makeplot(ax, tobin, theoryf, log=True, label="", c='r', obs=None, pval=None,
@@ -177,135 +293,22 @@ def makeplot(ax, tobin, theoryf, log=True, label="", c='r', obs=None, pval=None,
     if title is not None:
         ax.set_title(title)
 
-def fit_general_model(e,samples):
-   print("Fitting experiment {0}".format(e.name))
- 
-   # Collect data about experiment and how to fit it 
-   model = e.general_model
-
-   # Get options for fitting routines
-   null_opt = e.null_options
-   gen_opt  = e.general_options
-  
-   if do_MC:
-      # Get seeds for fitting routines, tailored to simulated data 
-      seeds = e.get_seeds(samples)
-      null_seeds = e.get_seeds_null(samples)
-     
-      # Do some fits!
-      Nproc = 3
-      print("Fitting null hypothesis...")
-      Lmax0, pmax0 = model.find_MLE_parallel(null_opt,samples,method='minuit',
-                                             Nprocesses=Nproc,seeds=null_seeds)
-      print("Fitting alternate hypothesis (free signal)...")
-      Lmax, pmax = model.find_MLE_parallel(gen_opt,samples,method='minuit',
-                                           Nprocesses=Nproc,seeds=seeds)
-
-      # Likelihood ratio test statistics
-      LLR = -2*(Lmax0 - Lmax)
-
-      # Correct (hopefully) small numerical errors
-      LLR[LLR<0] = 0
-   else:
-      LLR = None
-
-   # Also fit the observed data so we can compute its p-value 
-   print("Fitting with observed data...")
-   odata = e.observed_data
-   Lmax0_obs, pmax0_obs = model.find_MLE_parallel(null_opt, odata, 
-                 method='minuit', Nprocesses=1, seeds=e.get_seeds(odata))
-   Lmax_obs, pmax_obs = model.find_MLE_parallel(gen_opt, odata, 
-                 method='minuit', Nprocesses=1, seeds=e.get_seeds_null(odata))
- 
-   # Asymptotic p-value
-   LLR_obs = -2 * (Lmax0_obs[0] - Lmax_obs[0])
-   apval = 1 - sps.chi2.cdf(LLR_obs, e.DOF) 
-
-   # Empirical p-value
-   a = np.argsort(LLR)
-   print("LLR:",LLR[a])
-   print("Lmax0:",Lmax0[a])
-   print("Lmax :",Lmax[a])
-   if LLR is not None:
-      epval = c.e_pval(LLR,LLR_obs)
-   else:
-      epval = None
-   return LLR, LLR_obs, apval, epval, e.DOF
-
-def fit_mu_model(e,samples,s):
-   """Simulate the 'mu' hypothesis test
-   Need to generate the version of the model with the 'mu' parameter for this
-   Also need some signal shape to test. For testing purposes we just use a
-   test value provided by each experiment."""
-
-   print("Fitting experiment {0}".format(e.name))
-
-   # Create 'mu' version of model with fixed signal shape
-   model = e.make_mu_model(s)
-
-   # Get options for fitting routines
-   # Only need nuisance options this time
-   # Removed fixed status for 'mu' in alternate hypothesis fit
-   null_opt = {**e.nuis_options, 'mu': 0, 'fix_mu': True}
-   alt_opt = {**e.nuis_options, 'mu': 0.5, 'fix_mu': False}
-
-   if do_MC:
-      # Get seeds for fitting routines, tailored to simulated data 
-      # Only need the nuisance parameter seeds this time
-      null_seeds = e.get_seeds_null(samples)
-      
-      # Do some fits!
-      Nproc = 3
-      print("Fitting null hypothesis...")
-      Lmax0, pmax0 = model.find_MLE_parallel(null_opt,samples,method='minuit',
-                                             Nprocesses=Nproc,seeds=null_seeds)
-      print("Fitting alternate hypothesis (free signal)...")
-      Lmax, pmax = model.find_MLE_parallel(alt_opt,samples,method='minuit',
-                                           Nprocesses=Nproc,seeds=null_seeds)
-  
-      # Likelihood ratio test statistics
-      LLR = -2*(Lmax0 - Lmax)
-
-      # Correct (hopefully) small numerical errors
-      LLR[LLR<0] = 0
-   else:
-      LLR = None
-
-   # Fit the observed data so we can compute its p-value 
-   print("Fitting with observed data...")
-   odata = e.observed_data
-   Lmax0_obs, pmax0_obs = model.find_MLE_parallel(null_opt, odata, 
-                 method='minuit', Nprocesses=1, seeds=e.get_seeds_null(odata))
-   Lmax_obs, pmax_obs = model.find_MLE_parallel(alt_opt, odata, 
-                 method='minuit', Nprocesses=1, seeds=e.get_seeds_null(odata))
- 
-   # Asymptotic p-values
-   LLR_obs = -2 * (Lmax0_obs[0] - Lmax_obs[0])
-   pval = 1 - sps.chi2.cdf(LLR_obs, 1) # Only one unprofiled parameter, mu. 
-
-   if LLR is not None:
-      # Empirical p-value
-      epval = c.e_pval(LLR,LLR_obs)
-   else:
-      epval = None
-   return LLR, LLR_obs, pval, epval
-
 # Simulate data and prepare results dictionaries
 all_samples = []
-for e in experiments:
+for e in gof_experiments:
    if do_MC:
-      all_samples += [e.general_model.simulate(Nsamples,e.null_parameters)]
+      all_samples += [e.general_model.simulate(Nsamples,e.tests['gof'].test_pars)] # Just using test parameter values
    else:
       all_samples += [[]]
    results[e.name] = {}
- 
+
+LLR_obs_monster = 0
 if not skip_to_mu_mon:
    # Main loop for fitting experiments 
    LLR_monster = 0
-   LLR_obs_monster = 0
-   for j,(e,samples) in enumerate(zip(experiments,all_samples)):
+   for j,(e,samples) in enumerate(zip(gof_experiments,all_gof_samples)):
       # Do fit!
-      LLR, LLR_obs, pval, epval, DOF = fit_general_model(e,samples)
+      LLR, LLR_obs, pval, epval, DOF = e.do_gof_test(samples)
        
       # Save LLR for combining (only works if experiments have no common parameters)
       if LLR is not None:
@@ -323,30 +326,33 @@ if not skip_to_mu_mon:
       fig.savefig('auto_experiment_{0}_{1}.png'.format(e.name,tag))
    
       # Fit mu model
-      mu_LLR, mu_LLR_obs, mu_pval, mu_epval = fit_mu_model(e,samples,e.s_MLE)
+      if do_mu:
+          mu_LLR, mu_LLR_obs, mu_pval, mu_epval = e.do_mu_test(e.test_signal,samples)
    
-      # Plot! 
-      fig= plt.figure(figsize=(6,4))
-      ax = fig.add_subplot(111)
-      makeplot(ax, mu_LLR, lambda q: sps.chi2.pdf(q, 1), log=True, 
-              label='mu', c='b', obs=mu_LLR_obs, pval=mu_pval, title=e.name)
-      ax.legend(loc=1, frameon=False, framealpha=0,prop={'size':10})
-      fig.savefig('auto_experiment_mu_{0}_{1}.png'.format(e.name,tag))
+          # Plot! 
+          fig= plt.figure(figsize=(6,4))
+          ax = fig.add_subplot(111)
+          makeplot(ax, mu_LLR, lambda q: sps.chi2.pdf(q, 1), log=True, 
+                  label='mu', c='b', obs=mu_LLR_obs, pval=mu_pval, title=e.name)
+          ax.legend(loc=1, frameon=False, framealpha=0,prop={'size':10})
+          fig.savefig('auto_experiment_mu_{0}_{1}.png'.format(e.name,tag))
   
       # Store results
       results[e.name]["LLR_gof_b"]      = LLR_obs
-      results[e.name]["LLR_mu_b"]       = mu_LLR_obs
       results[e.name]["apval_gof_b"]    = pval
       results[e.name]["asignif. gof_b"] = -sps.norm.ppf(pval) #/2.) I prefer two-tailed but Andrew says 1-tailed is the convention...
-      results[e.name]["apval_mu_b"]     = mu_pval
-      results[e.name]["asignif. mu_b"]  = -sps.norm.ppf(mu_pval)
       results[e.name]["DOF"]            = DOF 
+      if do_mu:
+          results[e.name]["LLR_mu_b"]       = mu_LLR_obs
+          results[e.name]["apval_mu_b"]     = mu_pval
+          results[e.name]["asignif. mu_b"]  = -sps.norm.ppf(mu_pval)
       if LLR is not None:
-         results[e.name]["epval_gof_b"]    = epval
-         results[e.name]["esignif. gof_b"] = -sps.norm.ppf(epval) #/2.) I prefer two-tailed but Andrew says 1-tailed is the convention...
-         results[e.name]["epval_mu_b"]     = mu_epval
-         results[e.name]["esignif. mu_b"]  = -sps.norm.ppf(mu_epval)
-
+          results[e.name]["epval_gof_b"]    = epval
+          results[e.name]["esignif. gof_b"] = -sps.norm.ppf(epval) #/2.) I prefer two-tailed but Andrew says 1-tailed is the convention...
+          if do_mu:
+             results[e.name]["epval_mu_b"]     = mu_epval
+             results[e.name]["esignif. mu_b"]  = -sps.norm.ppf(mu_epval)
+ 
    a = np.argsort(LLR)
    print("LLR_monster:",LLR_monster[a])
  
@@ -369,30 +375,33 @@ if do_MC:
 else:
    monster_samples = None
 
-slist = [e.s_MLE for e in experiments]
-mu_LLR, mu_LLR_obs, mu_pval, mu_epval = fit_mu_model(m,monster_samples,slist)
-
-# Plot! 
-fig= plt.figure(figsize=(6,4))
-ax = fig.add_subplot(111)
-makeplot(ax, mu_LLR, lambda q: sps.chi2.pdf(q, 1), log=True, 
-        label='mu', c='b', obs=mu_LLR_obs, pval=mu_pval, title="Monster")
-ax.legend(loc=1, frameon=False, framealpha=0,prop={'size':10})
-fig.savefig('auto_experiment_mu_monster_{0}.png'.format(tag))
+if do_mu and do_monster:
+   slist = [e.s_MLE for e in experiments]
+   mu_LLR, mu_LLR_obs, mu_pval, mu_epval = fit_mu_model(m,monster_samples,slist)
+   
+   # Plot! 
+   fig= plt.figure(figsize=(6,4))
+   ax = fig.add_subplot(111)
+   makeplot(ax, mu_LLR, lambda q: sps.chi2.pdf(q, 1), log=True, 
+           label='mu', c='b', obs=mu_LLR_obs, pval=mu_pval, title="Monster")
+   ax.legend(loc=1, frameon=False, framealpha=0,prop={'size':10})
+   fig.savefig('auto_experiment_mu_monster_{0}.png'.format(tag))
 
 # Store results for Monster
 results["Combined"] = {}
 results["Combined"]["LLR_gof_b"]   = LLR_obs_monster
-results["Combined"]["LLR_mu_b"]    = mu_LLR_obs
 results["Combined"]["apval_gof_b"]  = monster_pval
-results["Combined"]["apval_mu_b"]   = mu_pval
 results["Combined"]["asignif. gof_b"] = -sps.norm.ppf(monster_pval)
-results["Combined"]["asignif. mu_b"]  = -sps.norm.ppf(mu_pval)
 results["Combined"]["DOF"]         = monster_DOF 
+if do_mu and do_monster:
+   results["Combined"]["LLR_mu_b"]    = mu_LLR_obs
+   results["Combined"]["apval_mu_b"]   = mu_pval
+   results["Combined"]["asignif. mu_b"]  = -sps.norm.ppf(mu_pval)
 if do_MC:
    results["Combined"]["epval_gof_b"]  = monster_epval
-   results["Combined"]["epval_mu_b"]   = mu_epval
    results["Combined"]["esignif. gof_b"] = -sps.norm.ppf(monster_epval)
+if do_MC and do_mu and do_monster:
+   results["Combined"]["epval_mu_b"]   = mu_epval
    results["Combined"]["esignif. mu_b"]  = -sps.norm.ppf(mu_epval)
 
 # Ok let's produce some nice tables of results. Maybe even
@@ -406,11 +415,11 @@ order = ['DOF',
 if do_MC: order += ['epval_gof_b']
 order += ['asignif. gof_b']
 if do_MC: order += ['esignif. gof_b']
-order += ['LLR_mu_b', 
-           'apval_mu_b'] 
-if do_MC: order += ['epval_mu_b']
-order += ['asignif. mu_b']
-if do_MC: order += ['esignif. mu_b']
+if do_mu: order += ['LLR_mu_b', 
+                    'apval_mu_b'] 
+if do_MC and do_mu: order += ['epval_mu_b']
+if do_mu: order += ['asignif. mu_b']
+if do_MC and do_mu: order += ['esignif. mu_b']
 exp_order = [e.name for e in experiments] + ['Combined']
 print(r[exp_order].reindex(order))
 

@@ -22,7 +22,13 @@ import numpy as np
 import scipy.stats as sps
 from functools import partial
 
+class Experiment:
+    """Just a dummy box to carry information about our experiments"""
+    def __init__(self,name):
+        self.name = name
+
 name = "test"
+e = Experiment(name)
 
 # "Background" predictions
 b = [5,6]
@@ -40,9 +46,7 @@ def pars2(mu,mu2):
 
 # Create the joint PDF object
 general_model = jtm.ParameterModel([jtd.TransDist(sps.norm,pars1),
-                                    jtd.TransDist(sps.norm,pars2)]
-                                   ,[['mu','mu1'],['mu','mu2']])
-
+                                    jtd.TransDist(sps.norm,pars2)])
 # Create the "observed" data
 # Need extra axes for matching shape of many simulated datasets
 observed_data = np.array([6.5,7.5])[np.newaxis,np.newaxis,:]
@@ -81,3 +85,15 @@ def make_mu_model(s):
                                  ,[['mu'],['mu']])
     return s_model 
 
+e.general_model    = general_model
+e.make_mu_model    = make_mu_model
+e.null_parameters  = null_parameters
+e.get_seeds        = get_seeds
+e.get_seeds_null   = get_seeds_null
+e.null_options     = null_options
+e.nuis_options     = nuis_options
+e.general_options  = general_options
+e.observed_data    = observed_data
+e.DOF              = DOF                  
+
+experiments = [e]
