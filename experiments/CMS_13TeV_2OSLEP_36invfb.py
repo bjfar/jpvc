@@ -11,6 +11,7 @@ import JMCtools.models as jtm
 import numpy as np
 import scipy.stats as sps
 from functools import partial
+import matplotlib.pyplot as plt
 from .experiment import Experiment
 
 name = "CMS_13TeV_2OSLEP_36invfb" 
@@ -59,6 +60,7 @@ def poisson_f(i, s, theta):
 
 # Parameter mapping function for nuisance parameter constraints
 def func_nuis(**thetas):
+    #print("in func_nuis:", thetas)
     means = np.array([thetas['theta_{0}'.format(i)] for i in range(N_regions)])
     return {'mean': means.flatten(),
              'cov': CMS_cov}
@@ -70,7 +72,8 @@ poisson_part = [jtd.TransDist(sps.poisson,partial(poisson_f,i),
                        ['s_{0} -> s'.format(i), 
                         'theta_{0} -> theta'.format(i)])
                  for i in range(N_regions)]
-corr_dist = jtd.TransDist(sps.multivariate_normal,func_nuis)
+corr_dist = jtd.TransDist(sps.multivariate_normal,func_nuis,
+               func_args=["theta_{0}".format(i) for i in range(N_regions)])
 correlations = [(corr_dist,7)]
 
 # Create the joint PDF object
@@ -87,7 +90,7 @@ nuis_options = {**theta_opt, **theta_opt2}
 general_options = {**s_options, **nuis_options}
 
 # Functions to provide starting guesses for parameters, tuned to each MC sample realisation
-def get_seeds(samples):
+def get_seeds_full(samples):
    """Gets seeds for s and theta fits"""
    seeds={}
    bin_samples = samples[:,0,:N_regions].T
@@ -97,6 +100,7 @@ def get_seeds(samples):
       s_MLE = bin_samples[i] - CMS_b[i] - theta_MLE
       seeds['theta_{0}'.format(i)] = theta_MLE
       seeds['s_{0}'.format(i)] = s_MLE 
+      #print('seeds for s_{0}: {1}'.format(i,s_MLE))
    return seeds
 
 def get_seeds_null(samples):
@@ -108,29 +112,84 @@ def get_seeds_null(samples):
       theta_seeds['theta_{0}'.format(i)] = theta_MLE
    return theta_seeds
 
+# Full observed data list, included observed values of nuisance measurements
+observed_data = np.concatenate([np.array(CMS_o),np.zeros(N_regions)],axis=-1)
+
+# Can define extra calculations to be done or plots to be created using the fit
+# results, to help diagnose any problems with the fits. 
+def dfull(e, Lmax0, pmax0, Lmax, pmax):
+    # Plot distribution of fit values against their
+    # true values under the null hypothesis. Make sure
+    # this makes sense.
+ 
+    expected = {**s_opt,**theta_opt}
+
+    fig = plt.figure(figsize=(14,6))
+    N = len(pmax.keys())
+    for i in range(14):
+        if i % 2 == 0:
+           key = 's_{0}'.format(i//2)
+           pos = i//2 + 1
+        elif i % 2 == 1:
+           key = 'theta_{0}'.format(i//2)
+           pos = i//2 + 1 + 7
+        val = pmax[key] 
+        val = val[np.isfinite(val)] # remove nans from failed fits
+        n, bins = np.histogram(val, normed=True)
+        ax = fig.add_subplot(2,7,pos)
+        ax.plot(bins[:-1],n,drawstyle='steps-post',label="")
+        ax.set_title(key)
+        trueval = expected[key]
+        ax.axvline(trueval,lw=2,c='k')
+    plt.tight_layout()
+    fig.savefig('{0}_diagnostic_full.png'.format(e.name))
+    
+def dnull(e, Lmax0, pmax0, Lmax, pmax):
+    # Plot distribution of fit values against their
+    # true values under the null hypothesis. Make sure
+    # this makes sense.
+ 
+    expected = {**theta_opt}
+
+    fig = plt.figure(figsize=(14,3))
+    N = len(pmax.keys())
+    for i in range(7):
+        key = 'theta_{0}'.format(i)
+        pos = i+1
+        val = pmax0[key]
+        val = val[np.isfinite(val)] # remove nans from failed fits 
+        #print(key, val)
+        n, bins = np.histogram(val, normed=True)
+        ax = fig.add_subplot(1,7,pos)
+        ax.plot(bins[:-1],n,drawstyle='steps-post',label="")
+        ax.set_title(key)
+        trueval = expected[key]
+        ax.axvline(trueval,lw=2,c='k')
+    plt.tight_layout()
+    fig.savefig('{0}_diagnostic_null.png'.format(e.name))
+ 
 # Define the experiment object and options for fitting during statistical tests
-e = Experiment(name,joint,CMS_o,DOF=7)
+e = Experiment(name,joint,observed_data,DOF=7)
  
 e.define_gof_test(nuisance_par_null=theta_opt,
                   test_pars={**s_opt,**theta_opt}, # Just for testing purposes
                   null_options=nuis_options,
                   full_options=general_options,
                   null_seeds=get_seeds_null,
-                  full_seeds=get_seeds
+                  full_seeds=get_seeds_full,
+                  diagnostics=[dfull,dnull]
                   )
 
 e.define_mu_test(nuisance_par_null=theta_opt,
                  null_options=nuis_options,
                  null_seeds=get_seeds_null,
-                 scale_with_mu=['s_{0}'.format(i) for i in range(N_regions)]
+                 scale_with_mu=['s_{0}'.format(i) for i in range(N_regions)],
+                 test_signal=test_signal
                  )
 
 # Return the number of non-nuisance parameters for the fit, for
 # degrees-of-freedom calculations
 # This applies to the 'general' model, not the 'mu' model.
 #e.DOF = 7
-
-# Compute observed maximum likelihood values
-observed_data = np.concatenate([np.array(CMS_o),np.zeros(len(CMS_o))],axis=-1)
 
 experiments = [e]

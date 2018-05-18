@@ -68,9 +68,9 @@ gof_null["alpha_s"]  = {'loc': 0.1181}
 gof_null["Z_invisible_width"] = {'loc': 0.2}
 def CMS_13TeV_2OSLEP_36invfb_NULL():
    null_s = {"s_{0}".format(i): 0 for i in range(7)} # Actually we'll leave this as zero signal for testing
-   null_theta = {"theta_{0}".format(i): 0 for i in range(7)}
-   null_parameters = {"mu": 0 , **null_s, **null_theta}
-   return null_parameters
+   #null_theta = {"theta_{0}".format(i): 0 for i in range(7)}
+   #null_parameters = {"mu": 0 , **null_s, **null_theta}
+   return null_s #parameters
 gof_null["CMS_13TeV_2OSLEP_36invfb"] = CMS_13TeV_2OSLEP_36invfb_NULL()
 
 # The 'mu' hypothesis null parameters should be defined internally by each experiment.
@@ -84,7 +84,7 @@ for em in experiment_modules:
         if 'gof' in e.tests.keys(): gof_experiments += [e]
         if 'mu'  in e.tests.keys(): mu_experiments  += [e]
 
-tag = "5e2"
+tag = "1e3"
 Nsamples = int(float(tag))
 #Nsamples = 0
 
@@ -102,7 +102,7 @@ if asymptotic_only:
     do_MC = False
 
 # Do single-parameter mu scaling fit?
-do_mu = True 
+do_mu = False 
 
 # Skip to mu_monster
 skip_to_mu_mon = False
@@ -296,6 +296,12 @@ def makeplot(ax, tobin, theoryf, log=True, label="", c='r', obs=None, pval=None,
 # Simulate data and prepare results dictionaries
 all_samples = []
 for e in gof_experiments:
+   print(e.name)
+   #print(e.general_model)
+   #print(e.general_model.model)
+   #print(e.general_model.model.submodels)
+   #print(e.general_model.model.submodels[0].submodels)
+   print("test_pars:",e.tests['gof'].test_pars)
    if do_MC:
       all_samples += [e.general_model.simulate(Nsamples,e.tests['gof'].test_pars)] # Just using test parameter values
    else:
@@ -306,9 +312,10 @@ LLR_obs_monster = 0
 if not skip_to_mu_mon:
    # Main loop for fitting experiments 
    LLR_monster = 0
-   for j,(e,samples) in enumerate(zip(gof_experiments,all_gof_samples)):
+   for j,(e,samples) in enumerate(zip(gof_experiments,all_samples)):
       # Do fit!
-      LLR, LLR_obs, pval, epval, DOF = e.do_gof_test(samples)
+      test_parameters = gof_null[e.name] # replace this with e.g. prediction from MSSM best fit
+      LLR, LLR_obs, pval, epval, gofDOF = e.do_gof_test(test_parameters,samples)
        
       # Save LLR for combining (only works if experiments have no common parameters)
       if LLR is not None:
@@ -320,19 +327,19 @@ if not skip_to_mu_mon:
       # Plot! 
       fig= plt.figure(figsize=(6,4))
       ax = fig.add_subplot(111)
-      makeplot(ax, LLR, lambda q: sps.chi2.pdf(q, DOF), log=True, 
+      makeplot(ax, LLR, lambda q: sps.chi2.pdf(q, gofDOF), log=True, 
               label='free s', c='g', obs=LLR_obs, pval=pval, title=e.name)
       ax.legend(loc=1, frameon=False, framealpha=0,prop={'size':10})
       fig.savefig('auto_experiment_{0}_{1}.png'.format(e.name,tag))
    
       # Fit mu model
       if do_mu:
-          mu_LLR, mu_LLR_obs, mu_pval, mu_epval = e.do_mu_test(e.test_signal,samples)
+          mu_LLR, mu_LLR_obs, mu_pval, mu_epval, muDOF = e.do_mu_test(e.tests['mu'].test_signal,samples)
    
           # Plot! 
           fig= plt.figure(figsize=(6,4))
           ax = fig.add_subplot(111)
-          makeplot(ax, mu_LLR, lambda q: sps.chi2.pdf(q, 1), log=True, 
+          makeplot(ax, mu_LLR, lambda q: sps.chi2.pdf(q, muDOF), log=True, #muDOF should just be 1 
                   label='mu', c='b', obs=mu_LLR_obs, pval=mu_pval, title=e.name)
           ax.legend(loc=1, frameon=False, framealpha=0,prop={'size':10})
           fig.savefig('auto_experiment_mu_{0}_{1}.png'.format(e.name,tag))
@@ -341,7 +348,7 @@ if not skip_to_mu_mon:
       results[e.name]["LLR_gof_b"]      = LLR_obs
       results[e.name]["apval_gof_b"]    = pval
       results[e.name]["asignif. gof_b"] = -sps.norm.ppf(pval) #/2.) I prefer two-tailed but Andrew says 1-tailed is the convention...
-      results[e.name]["DOF"]            = DOF 
+      results[e.name]["DOF"]            = gofDOF 
       if do_mu:
           results[e.name]["LLR_mu_b"]       = mu_LLR_obs
           results[e.name]["apval_mu_b"]     = mu_pval
@@ -359,7 +366,7 @@ if not skip_to_mu_mon:
    # Plot monster LLR distribution
    fig= plt.figure(figsize=(6,4))
    ax = fig.add_subplot(111)
-   monster_DOF = np.sum([e.DOF for e in experiments])
+   monster_DOF = np.sum([e.DOF for e in gof_experiments])
    monster_pval = 1 - sps.chi2.cdf(LLR_obs_monster, monster_DOF)
    monster_epval = c.e_pval(LLR_monster,LLR_obs_monster) if do_MC else None
    makeplot(ax, LLR_monster, lambda q: sps.chi2.pdf(q, monster_DOF), 
@@ -420,6 +427,6 @@ if do_mu: order += ['LLR_mu_b',
 if do_MC and do_mu: order += ['epval_mu_b']
 if do_mu: order += ['asignif. mu_b']
 if do_MC and do_mu: order += ['esignif. mu_b']
-exp_order = [e.name for e in experiments] + ['Combined']
+exp_order = [e.name for e in gof_experiments] + ['Combined']
 print(r[exp_order].reindex(order))
 
