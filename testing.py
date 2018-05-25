@@ -86,11 +86,12 @@ def run():
     mu_experiments = [] 
     for em in experiment_modules:
         for e in em.experiments.values():
+        #for e in [list(em.experiments.values())[0]]:
             if 'gof' in e.tests.keys(): gof_experiments += [e]
             if 'mu'  in e.tests.keys(): mu_experiments  += [e]
             #break
     
-    tag = "5e2"
+    tag = "5e3"
     Nsamples = int(float(tag))
     #Nsamples = 0
     

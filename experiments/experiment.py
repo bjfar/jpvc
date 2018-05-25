@@ -131,13 +131,13 @@ class Experiment:
         extra_null_opt = {**test_parameters}
         for key in test_parameters.keys():
             extra_null_opt["fix_{0}".format(key)] = True # fix these parameters
-        return self.do_test(model,'gof',samples,extra_null_opt)
+        return self.do_test(model,'gof',samples,extra_null_opt,test_parameters)
  
     def do_mu_test(self,nominal_signal,samples=None):
         model = self.make_mu_model(nominal_signal)
         return self.do_test(model,'mu',samples)
 
-    def do_test(self,model,test,samples=None,extra_null_opt=None):
+    def do_test(self,model,test,samples=None,extra_null_opt=None,signal=None):
         """Perform selected statistical test"""
 
         print("Fitting experiment {0} in '{1}' test".format(self.name,test))
@@ -147,7 +147,7 @@ class Experiment:
         if extra_null_opt: null_opt.update(extra_null_opt)
         full_opt = self.tests[test].full_options
         DOF      = self.tests[test].DOF
-   
+
         if samples != 'no_MC':
            # Get seeds for fitting routines, tailored to simulated (or any) data 
            null_seeds = self.tests[test].null_seeds
@@ -164,7 +164,7 @@ class Experiment:
               fseeds, fexact = full_seeds, False
 
            # Manually force numerical minimization
-           fexact, nexact = False, False
+           #fexact, nexact = False, False
 
            # Extract fixed parameter values from options
            null_fixed_pars = {}
@@ -183,9 +183,11 @@ class Experiment:
   
            # Do some fits!
            Nproc = 3
+           seeds0 = nseeds(samples,signal) # null hypothesis fits depend on signal parameters
+           seeds  = fseeds(samples)
            if nexact:
                print("Seeds are exact MLEs for null hypothesis; skipping minimisation")
-               pmax0 = nseeds(samples)
+               pmax0 = seeds0
                pmax0.update(null_fixed_pars)
                # need to loop over parameters, otherwise it will automatically evaluate
                # every set of parameters for every set of samples. We need them done
@@ -205,10 +207,10 @@ class Experiment:
            else:
                print("Fitting null hypothesis...")
                Lmax0, pmax0 = model.find_MLE_parallel(null_opt,samples,method='minuit',
-                                                  Nprocesses=Nproc,seeds=nseeds(samples))
+                                                  Nprocesses=Nproc,seeds=seeds0)
            print()
            if fexact:
-               pmax = fseeds(samples)
+               pmax = seeds
                pmax.update(full_fixed_pars)
                Nsamples = samples.shape[0]
                Lmax = np.zeros(Nsamples)
@@ -225,7 +227,7 @@ class Experiment:
            else:
                print("Fitting alternate hypothesis (free signal)...")
                Lmax, pmax = model.find_MLE_parallel(full_opt,samples,method='minuit',
-                                                Nprocesses=Nproc,seeds=fseeds(samples))
+                                                Nprocesses=Nproc,seeds=seeds)
            print()
 
            #print(null_opt)
@@ -238,7 +240,7 @@ class Experiment:
            dfuncs = self.tests[test].diagnostics
            if dfuncs:
                for f in dfuncs:
-                   f(self, Lmax0, pmax0, Lmax, pmax)
+                   f(self, Lmax0, pmax0, seeds0, Lmax, pmax, seeds, samples)
  
            # Likelihood ratio test statistics
            LLR = -2*(Lmax0 - Lmax)
@@ -251,21 +253,22 @@ class Experiment:
         # Also fit the observed data so we can compute its p-value 
         print("Fitting with observed data...")
         odata = self.observed_data
+        seeds0_obs = nseeds(odata,signal) # null hypothesis fits depend on signal parameters
+        seeds_obs  = fseeds(odata)
         if nexact:
-
-            pmax0_obs = fseeds(odata)
+            pmax0_obs = seeds0_obs
             pmax0_obs.update(null_fixed_pars)
             Lmax0_obs = model.logpdf(pmax0_obs,odata[0])
         else: 
             Lmax0_obs, pmax0_obs = model.find_MLE_parallel(null_opt, odata, 
-                      method='minuit', Nprocesses=1, seeds=nseeds(odata))
+                      method='minuit', Nprocesses=1, seeds=seeds0_obs)
         if fexact:
-            pmax_obs = fseeds(odata)
+            pmax_obs = seeds_obs
             pmax_obs.update(full_fixed_pars)
             Lmax_obs = model.logpdf(pmax_obs,odata[0])
         else: 
             Lmax_obs, pmax_obs = model.find_MLE_parallel(full_opt, odata, 
-                      method='minuit', Nprocesses=1, seeds=fseeds(odata))
+                      method='minuit', Nprocesses=1, seeds=seeds_obs)
 
         # Asymptotic p-value
         LLR_obs = -2 * (Lmax0_obs[0] - Lmax_obs[0])
@@ -273,9 +276,9 @@ class Experiment:
 
         # Empirical p-value
         a = np.argsort(LLR)
-        #print("LLR:",LLR[a])
-        #print("Lmax0:",Lmax0[a])
-        #print("Lmax :",Lmax[a])
+        print("LLR:",LLR[a])
+        print("Lmax0:",Lmax0[a])
+        print("Lmax :",Lmax[a])
         if LLR is not None:
            epval = c.e_pval(LLR,LLR_obs)
         else:
