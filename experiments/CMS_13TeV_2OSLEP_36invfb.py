@@ -90,7 +90,7 @@ nuis_options = {**theta_opt, **theta_opt2}
 general_options = {**s_options, **nuis_options}
 
 # Functions to provide starting guesses for parameters, tuned to each MC sample realisation
-def get_seeds_full(samples):
+def get_seeds_full(samples,signal):
    """Gets seeds for s and theta fits"""
    seeds={}
    bin_samples = samples[:,0,:N_regions].T
@@ -103,7 +103,7 @@ def get_seeds_full(samples):
       #print('seeds for s_{0}: {1}'.format(i,s_MLE))
    return seeds
 
-def get_seeds_null(samples):
+def get_seeds_null(samples,signal):
    """Gets seeds for just nuisance parameters fits"""
    theta_seeds={}
    theta_samples = samples[:,0,N_regions:].T
@@ -171,8 +171,7 @@ def dnull(e, Lmax0, pmax0, Lmax, pmax):
 # Define the experiment object and options for fitting during statistical tests
 e = Experiment(name,joint,observed_data,DOF=7)
  
-e.define_gof_test(nuisance_par_null=theta_opt,
-                  test_pars={**s_opt,**theta_opt}, # Just for testing purposes
+e.define_gof_test(test_pars={**s_opt,**theta_opt}, # Just for testing purposes
                   null_options=nuis_options,
                   full_options=general_options,
                   null_seeds=get_seeds_null,
@@ -192,4 +191,4 @@ e.define_mu_test(nuisance_par_null=theta_opt,
 # This applies to the 'general' model, not the 'mu' model.
 #e.DOF = 7
 
-experiments = [e]
+experiments = {e.name: e}

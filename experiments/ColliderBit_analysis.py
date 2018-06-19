@@ -59,10 +59,8 @@ class Analysis:
         #self.SR_s    
         self.cov = None
 
-    def make_experiment(self):
+    def make_experiment(self,signal=None):
         """Turn this analysis information into a jpvc experiment"""
-        self.N_SR = len(self.SR_names)
-
         # Maximum likelihood estimators for 's' parameters
         # under the observed data, ignoring correlations
         # between nuisance observations. Useful for seeding
@@ -75,24 +73,30 @@ class Analysis:
         if self.cov is not None:
            e = self.make_experiment_cov()
         else:
-           e = self.make_experiment_nocov()
+           e = self.make_experiment_nocov(signal)
         return e        
 
     # Functions to provide starting guesses for parameters, tuned to each MC sample realisation
-    def seeds_full_f_add(self):
-        def get_seeds_full(samples):
+    def seeds_full_f_add(self,selected=None):
+        def get_seeds_full(samples,signal):
            """Gets seeds for s and theta fits (additive nuisance)
               Gives exact MLEs for gof case!
            """
            seeds={}
-           bin_samples = samples[:,0,:self.N_SR].T
-           theta_samples = samples[:,0,self.N_SR:].T
-           for i in range(self.N_SR):
-              theta_MLE = theta_samples[i]
-              s_MLE = bin_samples[i] - theta_MLE - self.SR_b[i]
-              seeds['theta_{0}'.format(i)] = theta_MLE
-              seeds['s_{0}'.format(i)] = s_MLE 
-              #print('seeds for s_{0}: {1}'.format(i,s_MLE))
+           if selected is None:
+               SRlist = range(self.N_SR)
+               bin_samples = samples[:,0,:self.N_SR].T
+               theta_samples = samples[:,0,self.N_SR:].T
+           else:
+               SRlist = [selected]
+               bin_samples = samples[:,0,:1].T
+               theta_samples = samples[:,0,1:].T
+           for i,n,x in zip(SRlist,bin_samples,theta_samples):
+               theta_MLE = x
+               s_MLE = n - x - self.SR_b[i]
+               seeds['theta_{0}'.format(i)] = theta_MLE
+               seeds['s_{0}'.format(i)] = s_MLE 
+               #print('seeds for s_{0}: {1}'.format(i,s_MLE))
            return seeds
         return get_seeds_full
 
@@ -111,18 +115,23 @@ class Analysis:
            return seeds
         return get_seeds_full
     
-    def seeds_null_f(self): 
+    def seeds_null_f(self,selected=None): 
         def get_seeds_null(samples,signal):
            """Gets seeds for (both additive and multiplicative) nuisance parameters fits"""
            theta_seeds={}
-           theta_samples = samples[:,0,self.N_SR:].T
-           for i in range(self.N_SR):
-              theta_MLE = theta_samples[i]
+           if selected is None:
+               SRlist = range(self.N_SR)
+               theta_samples = samples[:,0,self.N_SR:].T
+           else:
+               SRlist = [selected] 
+               theta_samples = samples[:,0,1].T
+           for i,x in zip(SRlist,theta_samples):
+              theta_MLE = x
               theta_seeds['theta_{0}'.format(i)] = theta_MLE
            return theta_seeds
         return get_seeds_null
 
-    def seeds_null_f_gof(self): 
+    def seeds_null_f_gof(self,selected=None): 
         def get_seeds_null(samples,signal):
             """Gets seeds for additive nuisance parameters fits
                Gives exact MLEs for gof case!
@@ -132,29 +141,43 @@ class Analysis:
             theta_seeds={}
             self.theta_both={} # For debugging, need to compare BOTH solutions to numerical MLEs.
             self.theta_dat={}
-            bin_samples = samples[:,0,:self.N_SR].T
-            theta_samples = samples[:,0,self.N_SR:].T
-            for i in range(self.N_SR):
+            if selected is None:
+                if 2*self.N_SR!=samples.shape[-1]:
+                    raise ValueError("No signal region selected, so tried to compute seeds for all signal regions; however, supplied samples do not match the shape required for all signal regions! This analysis has {0} signal regions, so we require 2*{0}={1} random variates, but we only were given {2} (samples.shape = {3})".format(self.N_SR,2*self.N_SR,samples.shape[-1],samples.shape))
+                SRlist = range(self.N_SR)
+                bin_samples = samples[:,0,:self.N_SR].T
+                theta_samples = samples[:,0,self.N_SR:].T
+            else:
+                SRlist = [selected]
+                bin_samples = samples[:,0,:1].T
+                theta_samples = samples[:,0,1:].T
+            #print("stuff:",SRlist,bin_samples,theta_samples)
+            for i,n,x in zip(SRlist,bin_samples,theta_samples):
                 if verbose: print("Finding MLEs for theta_{0}; total samples: {1}".format(i,len(samples)))
-                s = signal['s_{0}'.format(i)] #self.SR_s[i]
+                if signal==None:
+                   s = 0
+                else:
+                   s = signal['s_{0}'.format(i)] #self.SR_s[i]
                 b = self.SR_b[i]
                 bsys = self.SR_b_sys[i]
-                n = bin_samples[i]
-                x = theta_samples[i]
                 A = 1./bsys**2
                 B = 1 + A*(s + b - x)
                 C = (s+b)*(1-A*x) - n
                 D = B**2 - 4*A*C
                 #D<0:
-                theta_MLE = np.zeros(len(samples))
+                theta_MLE = np.zeros(n.shape)
                 # No solutions! This is a drag, means MLE is on boundary of allowed space, not at a 'real' minima.
                 # Will mess up Wilk's theorem a bit. However MLE will necessarily just be on the boundary
                 # s + b + theta = 0
                 # so it is easy to compute at least
+                print("s:",s)
+                print("b:",b)
+                print("D:", D.shape)
                 theta_MLE[D<0] = -(s+b)
                 if verbose: print("No solution count:", np.sum(D<0))
                 #elif D==0:
                 # One real solution:
+                #print(B)
                 theta_MLE[D==0] = -B[D==0]/(2*A) # Is this always positive? Not sure...
                 if verbose: print("Single solution count:", np.sum(D==0))
                 #elif D>0:
@@ -262,7 +285,7 @@ class Analysis:
          
         # Set options for parameter fitting
         theta_opt  = {'theta_{0}'.format(i) : 0 for i in range(self.N_SR)}
-        theta_opt2 = {'error_theta_{0}'.format(i) : 1.*np.sqrt(self.cov[i][i]) for i in range(self.N_SR)} # Get good step sizes from covariance matrix
+        theta_opt2 = {'error_theta_{0}'.format(i) : 0.1*np.sqrt(self.cov[i][i]) for i in range(self.N_SR)} # Get good step sizes from covariance matrix
         s_opt  = {'s_{0}'.format(i): 0 for i in range(self.N_SR)} # Maybe zero is a good starting guess? Should use seeds that guess based on data.
         s_opt2 = {'error_s_{0}'.format(i) :  0.1*np.sqrt(self.cov[i][i]) for i in range(self.N_SR)} # Get good step sizes from covariance matrix.
         s_options = {**s_opt, **s_opt2}
@@ -276,8 +299,7 @@ class Analysis:
         # Define the experiment object and options for fitting during statistical tests
         e = Experiment(self.name,joint,observed_data,DOF=self.N_SR)
          
-        e.define_gof_test(nuisance_par_null=theta_opt,
-                          test_pars={**s_opt,**theta_opt}, # Just for testing purposes
+        e.define_gof_test(test_pars={**s_opt,**theta_opt}, # Just for testing purposes
                           null_options=nuis_options,
                           full_options=general_options,
                           null_seeds=self.seeds_null_f(),
@@ -295,7 +317,7 @@ class Analysis:
         return e
 
 
-    def make_experiment_nocov(self):
+    def make_experiment_nocov(self,signal):
         # Create the transformed pdf functions
         # Also requires some parameter renaming since we use the
         # same underlying function repeatedly
@@ -323,28 +345,71 @@ class Analysis:
                                   ['theta_{0} -> theta'.format(i)])
                       for i in range(self.N_SR)]
 
+        # Median data under background-only hypothesis
+        expected_data = np.concatenate([np.round(self.SR_b),np.zeros(self.N_SR)],axis=-1)
+        expected_data = expected_data[np.newaxis,np.newaxis,:] # Add required extra axes.
 
         #print("fractional systematic uncertainties:")
         #print([self.SR_b_sys[i]/self.SR_b[i] for i in range(self.N_SR)])
         #quit()
 
+        # This next part is a little tricky. We DON'T know the correlations
+        # between signal regions here, so we follow the method used in
+        # ColliderBit and choose just one signal region to use in our test,
+        # by picking, in advance, the region with the best sensitivity to
+        # the signal that we are interested in.
+        # That is, the signal region with the highest value of
+        # Delta LogL = LogL(n=b|s,b) - LogL(n=b|s=0,b)
+        # is selected.
+        #
+        # So, we need to compute this for all signal regions.
+        seedf = self.seeds_null_f_gof()
+        seedb = seedf(expected_data,signal) # null hypothesis fits depend on signal parameters
+        zero_signal = {'s_{0}'.format(i): 0 for i in range(self.N_SR)}
+        seed  = seedf(expected_data,zero_signal)
+        LLR = []
+        for i in range(self.N_SR):
+            model = jtm.ParameterModel([poisson_part_add[i]]+[sys_dist_add[i]])
+  
+            odata = np.array([np.round(self.SR_b[i])]+[0]) # median expected background-only data
+            si = 's_{0}'.format(i)
+            ti = 'theta_{0}'.format(i)
+            parsb = {ti: seedb[ti], **zero_signal}
+            pars  = {ti: seed[ti], **signal}
+
+            Lmaxb = model.logpdf(parsb,odata)
+            Lmax  = model.logpdf(pars,odata)
+
+            LLR += [-2 * (Lmax - Lmaxb)]
+           
+        # Select region with largest expected (background-only) LLR for this signal
+        selected = np.argmax(LLR)
+
+        print("Selected signal region {0} ({1}) in analysis {2}".format(selected,self.SR_names[selected],self.name))
+
         # Create the joint PDF object
         #joint = jtd.JointDist(poisson_part_mult + sys_dist_mult)
-        joint = jtd.JointDist(poisson_part_add + sys_dist_add) 
- 
-        # Set options for parameter fitting
-        #theta_opt  = {'theta_{0}'.format(i) : 1 for i in range(self.N_SR)} # multiplicative
-        theta_opt  = {'theta_{0}'.format(i) : 0 for i in range(self.N_SR)} # additive
-        theta_opt2 = {'error_theta_{0}'.format(i) : 1.*self.SR_b_sys[i] for i in range(self.N_SR)} # Get good step sizes from systematic error estimate
-        s_opt  = {'s_{0}'.format(i): 0 for i in range(self.N_SR)} # Maybe zero is a good starting guess? Should use seeds that guess based on data.
-        s_opt2 = {'error_s_{0}'.format(i) :  0.1*self.SR_b_sys[i] for i in range(self.N_SR)} # Get good step sizes from systematic error estimate
+        joint = jtd.JointDist([poisson_part_add[selected]] + [sys_dist_add[selected]]) 
+
+        theta_opt  = {'theta_{0}'.format(selected) : 0} # additive
+        theta_opt2 = {'error_theta_{0}'.format(selected) : 1.*self.SR_b_sys[selected]} # Get good step sizes from systematic error estimate
+        s_opt  = {'s_{0}'.format(selected): 0} # Maybe zero is a good starting guess? Should use seeds that guess based on data.
+        s_opt2 = {'error_s_{0}'.format(selected) :  0.1*self.SR_b_sys[selected]} # Get good step sizes from systematic error estimate
         s_options = {**s_opt, **s_opt2}
        
         nuis_options = {**theta_opt, **theta_opt2} #, 'print_level':1}
-        general_options = {**s_options, **nuis_options}
+        general_options = {**s_options, **nuis_options}  
 
-        # Full observed data list, included observed values of nuisance measurements
-        observed_data = np.concatenate([np.array(self.SR_n),np.zeros(self.N_SR)],axis=-1)
+        # # Set options for parameter fitting
+        # #theta_opt  = {'theta_{0}'.format(i) : 1 for i in range(self.N_SR)} # multiplicative
+        # theta_opt  = {'theta_{0}'.format(i) : 0 for i in range(self.N_SR)} # additive
+        # theta_opt2 = {'error_theta_{0}'.format(i) : 1.*self.SR_b_sys[i] for i in range(self.N_SR)} # Get good step sizes from systematic error estimate
+        # s_opt  = {'s_{0}'.format(i): 0 for i in range(self.N_SR)} # Maybe zero is a good starting guess? Should use seeds that guess based on data.
+        # s_opt2 = {'error_s_{0}'.format(i) :  0.1*self.SR_b_sys[i] for i in range(self.N_SR)} # Get good step sizes from systematic error estimate
+        # s_options = {**s_opt, **s_opt2}
+       
+        # nuis_options = {**theta_opt, **theta_opt2} #, 'print_level':1}
+        # general_options = {**s_options, **nuis_options}
 
         # print("Setup for experiment {0}".format(self.name))
         # #print("general_options:", general_options)
@@ -362,16 +427,16 @@ class Analysis:
         # quit()
 
         # Define the experiment object and options for fitting during statistical tests
-        e = Experiment(self.name,joint,observed_data,DOF=self.N_SR)
+        odata = np.array([self.SR_n[selected]]+[0]) # median expected background-only data
+        e = Experiment(self.name,joint,odata,DOF=1)
          
-        e.define_gof_test(nuisance_par_null=theta_opt,
-                          test_pars={**s_opt,**theta_opt}, # Just for testing purposes
+        e.define_gof_test(test_pars={**s_opt,**theta_opt}, # Just for testing purposes
                           null_options=nuis_options,
                           full_options=general_options,
-                          null_seeds=(self.seeds_null_f_gof(), True),
-                          full_seeds=(self.seeds_full_f_add(), True), # Extra flag indicates that the "seeds" are actually the analytically exact MLEs, so no numerical minimisation needed
-                          diagnostics=[self.make_dfull(s_opt,theta_opt),
-                                       self.make_dnull(theta_opt),
+                          null_seeds=(self.seeds_null_f_gof(selected), True),
+                          full_seeds=(self.seeds_full_f_add(selected), True), # Extra flag indicates that the "seeds" are actually the analytically exact MLEs, so no numerical minimisation needed
+                          diagnostics=[self.make_dfull(s_opt,theta_opt,selected),
+                                       self.make_dnull(theta_opt,selected),
                           ])
                           #             self.make_seedcheck(),
                           #             self.make_checkpdf()]
@@ -379,8 +444,8 @@ class Analysis:
         
         e.define_mu_test(nuisance_par_null=theta_opt,
                          null_options=nuis_options,
-                         null_seeds=self.seeds_null_f(),
-                         scale_with_mu=['s_{0}'.format(i) for i in range(self.N_SR)],
+                         null_seeds=self.seeds_null_f_gof(selected),
+                         scale_with_mu=['s_{0}'.format(selected)],
                          test_signal=self.test_signal
                          )
 
@@ -399,7 +464,7 @@ class Analysis:
 
         return e
 
-    def make_dfull(self,s_opt,theta_opt):
+    def make_dfull(self,s_opt,theta_opt,selected=None):
         # Can define extra calculations to be done or plots to be created using the fit
         # results, to help diagnose any problems with the fits. 
         def dfull(e, Lmax0, pmax0, seeds0, Lmax, pmax, seeds, samples):
@@ -411,18 +476,24 @@ class Analysis:
         
             fig = plt.figure(figsize=(2*self.N_SR,6))
             N = len(pmax.keys())
-            for i in range(2*self.N_SR):
+           
+            if selected is None:
+               SRlist = range(self.N_SR)
+            else:
+               SRlist = [selected]
+            NSR = len(SRlist)
+            for i in range(2*NSR):
                 if i % 2 == 0:
-                   key = 's_{0}'.format(i//2)
                    pos = i//2 + 1
+                   key = 's_{0}'.format(SRlist[i//2])
                 elif i % 2 == 1:
-                   key = 'theta_{0}'.format(i//2)
-                   pos = i//2 + 1 + self.N_SR
+                   pos = i//2 + 1 + NSR
+                   key = 'theta_{0}'.format(SRlist[i//2])
                 val = pmax[key] 
                 val = val[np.isfinite(val)] # remove nans from failed fits
                 #val = val[val>=0] # remove non-positive MLEs, these can't be log'd
                 n, bins = np.histogram(val, normed=True)
-                ax = fig.add_subplot(2,self.N_SR,pos)
+                ax = fig.add_subplot(2,NSR,pos)
                 ax.plot(bins[:-1],n,drawstyle='steps-post',label="")
                 ax.set_title(key)
                 trueval = expected[key]
@@ -433,7 +504,7 @@ class Analysis:
 
         return dfull            
 
-    def make_dnull(self,theta_opt):
+    def make_dnull(self,theta_opt,selected=None):
         def dnull(e, Lmax0, pmax0, seeds0, Lmax, pmax, seeds, samples):
             # Plot distribution of fit values against their
             # true values under the null hypothesis. Make sure
@@ -443,15 +514,21 @@ class Analysis:
         
             fig = plt.figure(figsize=(2*self.N_SR,3))
             N = len(pmax.keys())
-            for i in range(self.N_SR):
-                key = 'theta_{0}'.format(i)
+
+            if selected is None:
+               SRlist = range(self.N_SR)
+            else:
+               SRlist = [selected]
+            NSR = len(SRlist)
+            for i,SR in enumerate(SRlist):
+                key = 'theta_{0}'.format(SR)
                 pos = i+1
                 val = pmax0[key]
                 val = val[np.isfinite(val)] # remove nans from failed fits
                 #val = val[val>=0] # remove non-positive MLEs, these can't be log'd 
                 #print(key, val)
                 n, bins = np.histogram(val, normed=True)
-                ax = fig.add_subplot(1,self.N_SR,pos)
+                ax = fig.add_subplot(1,NSR,pos)
                 ax.plot(bins[:-1],n,drawstyle='steps-post',label="")
                 ax.set_title(key)
                 trueval = expected[key]
@@ -563,6 +640,7 @@ a.SR_names = ["SR2_SF_loose", "SR2_SF_tight", "SR2_DF_100", "SR2_DF_150", "SR2_D
 a.SR_n     = [153, 9, 78, 11, 6, 2, 2, 0, 11, 4, 3, 9, 0, 0, 21, 1, 2, 1, 3, 4, ]
 a.SR_b     = [133, 9.8, 68, 11.5, 2.1, 0.6, 4.1, 1.6, 4.2, 2.2, 2.8, 5.4, 1.4, 1.1, 21.7, 2.7, 1.6, 2.2, 1.8, 1.3, ]
 a.SR_b_sys = [22, 2.9, 7, 3.1, 1.9, 0.6, 2.6, 1.6, 3.4, 0.8, 0.4, 0.9, 0.4, 0.2, 2.9, 0.5, 0.3, 0.5, 0.3, 0.3, ]
+a.N_SR = len(a.SR_names)
 analyses[a.name] = a
 
 a = Analysis("CMS_13TeV_1LEPbb_36invfb")
@@ -570,6 +648,7 @@ a.SR_names = ["SRA", "SRB", ]
 a.SR_n     = [11, 7, ]
 a.SR_b     = [7.5, 8.7, ]
 a.SR_b_sys = [2.5, 2.2, ]
+a.N_SR = len(a.SR_names)
 analyses[a.name] = a
 
 a = Analysis("CMS_13TeV_2LEPsoft_36invfb")
@@ -577,6 +656,7 @@ a.SR_names = ["SR1", "SR3", "SR4", "SR5", "SR6", "SR7", "SR8", "SR9", "SR10", "S
 a.SR_n     = [2, 19, 18, 1, 0, 3, 1, 2, 1, 2, 0, ]
 a.SR_b     = [3.5, 17, 11, 1.6, 3.5, 2, 0.51, 1.4, 1.5, 1.5, 1.2, ]
 a.SR_b_sys = [1, 2.4, 2, 0.7, 0.9, 0.7, 0.52, 0.7, 0.6, 0.8, 0.6, ]
+a.N_SR = len(a.SR_names)
 analyses[a.name] = a
 
 a = Analysis("CMS_13TeV_2OSLEP_36invfb")
@@ -591,6 +671,7 @@ a.cov = [[52.8, 12.7,    3,  1.2,  4.5,  5.1,  1.2],
  [ 4.5,  2.5,  0.4,  0.3,  6.5,  1.8,  0.4],
  [ 5.1,    2,  0.3,  0.1,  1.8,  2.4,  0.4],
  [ 1.2,  0.7,  0.1,  0.1,  0.4,  0.4,  0.2]]
+a.N_SR = len(a.SR_names)
 #analyses[a.name] = a
 
 a = Analysis("CMS_13TeV_2OSLEP_confnote_36invfb_NOCOVAR_NOLIKE")
@@ -598,13 +679,15 @@ a.SR_names = ["SR-1", "SR-2", "SR-3", "SR-4", "SR-5", "SR-6", "SR-7", "SR-8", "S
 a.SR_n     = [793, 57, 29, 2, 0, 82, 9, 5, 1, ]
 a.SR_b     = [793, 54.9, 21.6, 6, 2.5, 82, 7.6, 5.6, 1.3, ]
 a.SR_b_sys = [32.2, 7, 5.6, 1.9, 0.9, 9.5, 2.8, 1.6, 0.4, ]
-analyses[a.name] = a
+a.N_SR = len(a.SR_names)
+#analyses[a.name] = a
 
 a = Analysis("CMS_13TeV_MONOJET_36invfb")
 a.SR_names = ["sr-0", "sr-1", "sr-2", "sr-3", "sr-4", "sr-5", "sr-6", "sr-7", "sr-8", "sr-9", "sr-10", "sr-11", "sr-12", "sr-13", "sr-14", "sr-15", "sr-16", "sr-17", "sr-18", "sr-19", "sr-20", "sr-21", ]
 a.SR_n     = [136865, 74340, 42540, 25316, 15653, 10092, 8298, 4906, 2987, 2032, 1514, 926, 557, 316, 233, 172, 101, 65, 46, 26, 31, 29, ]
 a.SR_b     = [134500, 73400, 42320, 25490, 15430, 10160, 8480, 4865, 2970, 1915, 1506, 844, 526, 325, 223, 169, 107, 88.1, 52.8, 25, 25.5, 26.9, ]
 a.SR_b_sys = [3700, 2000, 810, 490, 310, 170, 140, 95, 49, 33, 32, 18, 14, 12, 9, 8, 6, 5.3, 3.9, 2.5, 2.6, 2.8, ]
+a.N_SR = len(a.SR_names)
 analyses[a.name] = a
 
 a = Analysis("CMS_13TeV_MultiLEP_36invfb")
@@ -612,17 +695,19 @@ a.SR_names = ["SR1", "SR3", "SR4", "SR5", "SR6", "SR7", "SR8", ]
 a.SR_n     = [13, 19, 128, 18, 2, 82, 166, ]
 a.SR_b     = [12, 19, 142, 22, 1.2, 109, 197, ]
 a.SR_b_sys = [3, 4, 34, 5, 0.6, 28, 42, ]
+a.N_SR = len(a.SR_names)
 analyses[a.name] = a
 
 analyses["ATLAS_13TeV_MultiLEP_36invfb"].SR_s     = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 0, 0, 0, 1, 0, 1, 4, ]
 analyses["CMS_13TeV_1LEPbb_36invfb"].SR_s     = [0, 8, ]
 analyses["CMS_13TeV_2LEPsoft_36invfb"].SR_s     = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, ]
 #analyses["CMS_13TeV_2OSLEP_36invfb"].SR_s     = [0, 1, 3, 2, 0, 0, 0, ]
-analyses["CMS_13TeV_2OSLEP_confnote_36invfb_NOCOVAR_NOLIKE"].SR_s     = [0, 0, 0, 1, 1, 0, 0, 0, 0, ]
+#analyses["CMS_13TeV_2OSLEP_confnote_36invfb_NOCOVAR_NOLIKE"].SR_s     = [0, 0, 0, 1, 1, 0, 0, 0, 0, ]
 analyses["CMS_13TeV_MONOJET_36invfb"].SR_s     = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ]
 analyses["CMS_13TeV_MultiLEP_36invfb"].SR_s     = [0, 2, 1, 2, 1, 1, 0, ]
 
-experiments = {}
-for a in analyses.values():
-   experiments[a.name] = a.make_experiment()
-   experiments[a.name].N_SR = a.N_SR #useful to know this
+# Actually we need a test signal to generate the experiment, since we need to select the analysis to use based on this signal hypothesis[
+#experiments = {}
+#for a in analyses.values():
+#   experiments[a.name] = a.make_experiment()
+#   experiments[a.name].N_SR = a.N_SR #useful to know this

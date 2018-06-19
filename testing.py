@@ -54,12 +54,15 @@ import concurrent.futures
 # To import experiments it is nice to do it like this,
 # so that we can iterate over them
 import importlib
+from experiments.experiment import Experiment
+import experiments.ColliderBit_analysis as CBa
 
 def run():
     #experiment_definitions = ["CMS_13TeV_2OSLEP_36invfb"] #"gaussian"
-    experiment_definitions = ["ColliderBit_analysis"]
-    experiment_modules = [importlib.import_module("experiments.{0}".format(lib)) 
-                     for lib in experiment_definitions]
+    #experiment_definitions = ["Hinv"] #,"ColliderBit_analysis"]
+    experiment_definitions = []
+    experiment_modules = {lib: importlib.import_module("experiments.{0}".format(lib)) 
+                     for lib in experiment_definitions}
     
     # Set the null hypothesis for 'gof' tests. This means fixing the non-nuisance
     # parameters in all of the experiments to something.
@@ -69,28 +72,39 @@ def run():
     gof_null["top_mass"] = {'loc': 173.34}
     gof_null["alpha_s"]  = {'loc': 0.1181}
     gof_null["Z_invisible_width"] = {'loc': 0.2}
+    gof_null["Higgs_invisible_width"] = {'BF': 0}
     def Collider_Null(N_SR):
        null_s = {"s_{0}".format(i): 0 for i in range(N_SR)} # Actually we'll leave this as zero signal for testing
        #null_theta = {"theta_{0}".format(i): 0 for i in range(7)}
        #null_parameters = {"mu": 0 , **null_s, **null_theta}
        return null_s #parameters
     
-    for key, val in experiment_modules[0].experiments.items():
-       gof_null[key] = Collider_Null(val.N_SR)
-    
     # The 'mu' hypothesis null parameters should be defined internally by each experiment.
-    
+
+    # Add the ColliderBit analyses; have to do this after signal hypothesis is
+    # set.
+    CBexperiments = {}
+    for a in CBa.analyses.values():
+        signal = Collider_Null(a.N_SR)
+        gof_null[a.name] = signal
+        CBexperiments[a.name] = a.make_experiment(signal)
+    class Empty: pass
+    experiment_modules["ColliderBit_analysis"] = Empty() # container to act like module
+    experiment_modules["ColliderBit_analysis"].experiments = CBexperiments
+
     # Extract all experiments from modules (some define more than one experiment)
     # Not all experiments are used in all tests, so we also divide them up as needed
     gof_experiments = []
     mu_experiments = [] 
-    for em in experiment_modules:
+    all_experiments = []
+    for em in experiment_modules.values():
         for e in em.experiments.values():
         #for e in [list(em.experiments.values())[0]]:
+            all_experiments += [e]
             if 'gof' in e.tests.keys(): gof_experiments += [e]
             if 'mu'  in e.tests.keys(): mu_experiments  += [e]
             #break
-    
+   
     tag = "5e3"
     Nsamples = int(float(tag))
     #Nsamples = 0
@@ -109,13 +123,13 @@ def run():
         do_MC = False
     
     # Do single-parameter mu scaling fit?
-    do_mu = False 
+    do_mu = True 
     
     # Skip to mu_monster
-    skip_to_mu_mon = False
+    skip_to_mu_mon = True
     
     # Analyse full combined model?
-    do_monster = False
+    do_monster = True
     
     # Dictionary of results
     results = {}
@@ -127,147 +141,9 @@ def run():
     # a GAMBIT best fit point. For that, we need to simulate under
     # some best-fit signal hypothesis.
     
-    
-    # Merge all experiments into one giant experiment
-    # Will have problems with parameter name collisions. Can avoid them
-    # manually for now, but can fix in the future
-    class MonsterExperiment:
-        """Class to create a single 'monster' experiment out of
-           a list of independent experiments
-          
-           List of stuff that an experiment needs to define:
-    
-            name
-            general_model
-            make_mu_model
-            null_parameters
-            get_seeds
-            get_seeds_null
-            null_options
-            general_options
-            observed_data
-            DOF
-        """
-    
-        def __init__(self,experiments,name="Monster",common_pars=[]):
-            self.name = name
-            self.null_parameters = {}
-            self.null_options = {}
-            self.general_options = {}
-            self.nuis_options = {}
-            self.DOF = 0
-            obs_data_list = []
-            parmodels = []
-            self.make_mu_model_fs = []
-            self.get_seed_fs      = []
-            self.get_seed_null_fs = []
-            self.experiment_dims = []
-            self.experiment_names = []
-            # Create new 'general' ParameterModel combining 
-            # all submodels of all experiments
-            for e in experiments:
-                parmodels += [e.general_model]
-            self.general_model, renaming = self.create_jointmodel(parmodels,common_pars)
-            #print("renaming:",renaming)
-     
-            # Collect the rest of the data about each experiment, and
-            # performing any parameter renaming that was needed to avoid
-            # name collisions in the new JointModel.
-            for e, rename in zip(experiments,renaming):
-                self.null_parameters.update(self.rename_options(e.null_parameters,rename))
-                self.null_options.update(self.rename_options(e.null_options,rename))
-                self.nuis_options.update(self.rename_options(e.nuis_options,rename))
-                self.general_options.update(self.rename_options(e.general_options,rename))
-                self.DOF += e.DOF
-                self.make_mu_model_fs += [e.make_mu_model]
-                self.get_seed_fs      += [e.get_seeds]
-                self.get_seed_null_fs += [e.get_seeds_null]
-                self.experiment_dims  += [np.sum(e.general_model.model.dims)]
-                self.experiment_names += [e.name]
-                obs_data_list += [e.observed_data]
-            # Join observed data along last axis
-            self.observed_data = np.concatenate(
-                     [o.reshape(1,1,-1) for o in obs_data_list],axis=-1) 
-    
-        def rename_options(self,options,renaming):
-            # Work out renaming
-            rename_dict = {}
-            for instruction in renaming:
-                new,old = instruction.split(' -> ')
-                rename_dict[old] = new
-            # Collect and rename options/parameters
-            # This is tricky in general since options could have
-            # weird names depending on parameters. So for now this
-            # only works for the Minuit options.
-            # We replace 'par' in the following:
-            # 'par'
-            # 'error_par'
-            # 'fix_par'
-            new_opts = {}
-            for key,val in options.items():
-                newkey = key
-                words = key.split("_")
-                if len(words)==1:
-                    if words[0] in rename_dict.keys():
-                        newkey = rename_dict[key]
-                if len(words)==2:
-                    if words[0] == 'error' or words[0] == 'fix':
-                        par = '_'.join(words[1:])
-                        if par in rename_dict.keys():
-                            newkey = '{0}_{1}'.format(words[0],rename_dict[par])
-                new_opts[newkey] = val
-            return new_opts 
-    
-        def create_jointmodel(self,parmodels,common_pars=[]):
-            """Create a single giant ParameterModel out of a list of
-            ParameterModels"""
-            all_submodels = []
-            all_fargs = []
-            all_dims = []
-            all_renaming = []
-            for i,m in enumerate(parmodels):
-                # Collect submodels and perform parameter renaming to avoid
-                # collisions, except where parameters are explicitly set
-                # as being common.
-                all_renaming += [[]]
-                for submodel in m.model.submodels:
-                    temp = jtd.TransDist(submodel) # Need this to figure out parameter names
-                    renaming = ['Exp{0}_{1} -> {1}'.format(i,par) for par in temp.args if par not in common_pars] 
-                    #print(renaming, temp.args, common_pars)
-                    all_renaming[i] += renaming  
-                    all_submodels += [jtd.TransDist(submodel,renaming_map=renaming)]
-                all_dims += m.model.dims
-                all_fargs += m.submodel_deps
-            new_joint = jtd.JointModel(list(zip(all_submodels,all_dims)))
-            return jtm.ParameterModel(new_joint,all_fargs), all_renaming
-    
-        def make_mu_model(self,slist): 
-            """Create giant ParameterModel for a signal hypothesis 's'
-               Might have to re-think this to more easily handle various
-               types of signals, especially e.g. signals for unbinned
-               likelihoods."""
-            jointmodels = []
-            for s,f in zip(slist,self.make_mu_model_fs):
-                jointmodels += [f(s)]
-            return self.create_jointmodel(jointmodels,common_pars=['mu'])[0] 
-    
-        def get_seeds(self,samples):
-            datalist = c.split_data(samples,self.experiment_dims)
-            print("samples.shape:",samples.shape)
-            print("datalist.shapes:",[d.shape for d in datalist])
-            seeds = {}
-            for data, seedf in zip(datalist,self.get_seed_fs):
-                seeds.update(seedf(data))
-    
-        def get_seeds_null(self,samples):
-            datalist = c.split_data(samples,self.experiment_dims)
-            seeds = {}
-            for data, seedf in zip(datalist,self.get_seed_null_fs):
-                seeds.update(seedf(data))
-    
     # Create monster joint experiment
     if do_monster:
-        m = MonsterExperiment(experiments)
+        m = Experiment.fromExperimentList(all_experiments)
     
     # Helper plotting function
     def makeplot(ax, tobin, theoryf, log=True, label="", c='r', obs=None, pval=None, 
@@ -279,9 +155,12 @@ def run():
             ran = qran
         yran = (1e-4,0.5)
         if tobin is not None:
+           #print(tobin)
            n, bins = np.histogram(tobin, bins=50, normed=True, range=ran)
-           print("Histogram y range:", np.min(n[n!=0]),np.max(n))
+           #print(n)
+           #print("Histogram y range:", np.min(n[n!=0]),np.max(n))
            ax.plot(bins[:-1],n,drawstyle='steps-post',label=label,c=c)
+           yran = (1e-4,np.max([0.5,np.max(n)]))
         q = np.arange(ran[0],ran[1],0.01)
         if theoryf is not None:
             ax.plot(q, theoryf(q),c='k')
@@ -297,7 +176,7 @@ def run():
                ax.fill_between(qfill, 0, theoryf(qfill), lw=0, facecolor=c, alpha=0.2)
             pval_str = ""
             if pval!=None:
-               print("pval:", pval)
+               #print("pval:", pval)
                pval_str = " (p={0:.2g})".format(pval)
             ax.axvline(x=obs,lw=2,c=c,label="Observed ({0}){1}".format(label,pval_str))
         ax.set_xlim(ran[0],ran[1])
@@ -329,6 +208,7 @@ def run():
           test_parameters = gof_null[e.name] # replace this with e.g. prediction from MSSM best fit
           LLR, LLR_obs, pval, epval, gofDOF = e.do_gof_test(test_parameters,samples)
           # Save LLR for combining (only works if experiments have no common parameters)
+          #print("j:{0}, LLR:{1}".format(j,LLR))
           if LLR is not None:
              LLR_monster += LLR
           else:
@@ -378,16 +258,22 @@ def run():
      
        a = np.argsort(LLR)
        #print("LLR_monster:",LLR_monster[a])
-     
+       #quit()     
+
        # Plot monster LLR distribution
        fig= plt.figure(figsize=(6,4))
        ax = fig.add_subplot(111)
        monster_DOF = np.sum([e.DOF for e in gof_experiments])
-       monster_pval = 1 - sps.chi2.cdf(LLR_obs_monster, monster_DOF)
+       monster_pval = np.atleast_1d(1 - sps.chi2.cdf(LLR_obs_monster, monster_DOF))[0]
        monster_epval = c.e_pval(LLR_monster,LLR_obs_monster) if do_MC else None
+       monster_qran = [0, sps.chi2.ppf(sps.chi2.cdf(25,df=1),df=monster_DOF)]  
+       print("Monster DOF:", monster_DOF)
+       print("Monster pval:", monster_pval)
+       print("Monster LLR_obs:", LLR_obs_monster)
        makeplot(ax, LLR_monster, lambda q: sps.chi2.pdf(q, monster_DOF), 
                 log=True, label='free s', c='g',
-                obs=LLR_obs_monster, pval=monster_pval, title="Monster")
+                obs=LLR_obs_monster, pval=monster_pval, 
+                qran=monster_qran, title="Monster")
        ax.legend(loc=1, frameon=False, framealpha=0,prop={'size':10})
        fig.savefig('auto_experiment_monster_{0}.png'.format(tag))
        plt.close(fig)
@@ -398,11 +284,12 @@ def run():
                                     for samp in all_samples],axis=-1)
     else:
        monster_samples = None
-    
+    print("monster_samples.shape:",monster_samples.shape)
+ 
     if do_mu and do_monster:
-       slist = [e.s_MLE for e in experiments]
-       mu_LLR, mu_LLR_obs, mu_pval, mu_epval = fit_mu_model(m,monster_samples,slist)
-       
+       signal = m.tests['mu'].test_signal
+       mu_LLR, mu_LLR_obs, mu_pval, mu_epval, muDOF = m.do_mu_test(signal,monster_samples) 
+ 
        # Plot! 
        fig= plt.figure(figsize=(6,4))
        ax = fig.add_subplot(111)
